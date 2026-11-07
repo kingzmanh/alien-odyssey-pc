@@ -30,6 +30,9 @@ Scripted install: `"Alien Odyssey PC Setup.exe" /silent /cd <iso|cue|drive|folde
   - *View*: window size, fullscreen (Alt+Enter), FPS in the title. All saved in `odyssey_pc.ini`.
   - The videos and 2D screens only carry their original 320x200 pixels; they go through the filter.
 - Keyboard as in the original (`GAME.CFG` holds the key layout, as on DOS).
+- **Mouse aiming** on the bike and in the mine cart: move the mouse to aim, left button fires (the game's
+  own mouse control, `Controller 0` in `GAME.CFG`, switchable in *Input > Mouse aiming*). The pointer is
+  captured while the game aims with it. *Input > Mouse sensitivity* / *Invert mouse Y*.
 - Speech, sound effects and the FMV soundtracks through a software mixer; music through the
   Windows General MIDI synthesizer (the game's General MIDI arrangements).
 - Saved games go to `game\hd\SAVEGAME`.

@@ -13,6 +13,8 @@ int opt_aspect = 0;          /* 0 4:3, 1 stretch, 2 whole multiples of the game'
 int opt_vsync = 1;
 int opt_scale = 4;           /* internal resolution of the 3D game's scenes (x 320x200) */
 int opt_showfps = 0;
+int opt_mouse_sens = 100;     /* % of the Windows mouse counts given to the game */
+int opt_mouse_invert = 0;
 
 static char ini_path[700];
 
@@ -56,6 +58,8 @@ void settings_load(const char *exe_dir)
     opt_vsync = ini_int("video", "VSync", 1, 0, 1);
     opt_scale = ini_int("video", "RenderScale", 4, 1, 6);
     opt_showfps = ini_int("video", "ShowFPS", 0, 0, 1);
+    opt_mouse_sens = ini_int("input", "MouseSensitivity", 100, 10, 800);
+    opt_mouse_invert = ini_int("input", "InvertMouseY", 0, 0, 1);
     rt_log("options: Fullscreen=%d Filter=%d Sharpen=%d FXAA=%d Aspect=%d VSync=%d\n",
            opt_fullscreen, opt_filter, opt_sharpen, opt_fxaa, opt_aspect, opt_vsync);
 }
@@ -77,4 +81,10 @@ void settings_save_video(void)
     put("Aspect", opt_aspect);
     put("RenderScale", opt_scale);
     put("ShowFPS", opt_showfps);
+    {
+        char v[16];
+        snprintf(v, sizeof v, "%d", opt_mouse_sens);
+        WritePrivateProfileStringA("input", "MouseSensitivity", v, ini_path);
+        WritePrivateProfileStringA("input", "InvertMouseY", opt_mouse_invert ? "1" : "0", ini_path);
+    }
 }

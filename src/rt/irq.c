@@ -104,7 +104,7 @@ void input_pump(void)
         for (int k = 0; k < idx / 2 && p; k++) { p = strchr(p, ';'); if (p) p++; }
         int cx, cy, cms;
         if (p && *p && sscanf(p, "%d,%d,%d", &cx, &cy, &cms) == 3) {
-            if (!(idx & 1) && now >= (u64)cms) { mouse_x = cx; mouse_y = cy; mouse_buttons |= 1; mouse_press_time(1); idx++; rt_log("test: click %d,%d\n", cx, cy); }
+            if (!(idx & 1) && now >= (u64)cms) { mouse_x = cx; mouse_y = cy; mouse_buttons |= 1; mouse_press_time(1); { extern void mouse_button_event(int, int); mouse_button_event(1, 1); } idx++; rt_log("test: click %d,%d\n", cx, cy); }
             else if ((idx & 1) && now >= (u64)cms + 300) { mouse_buttons &= ~1; idx++; }
         }
     }
@@ -120,6 +120,23 @@ void input_pump(void)
             if (!down && now >= (u64)ms) { kbd_push_scancode((u8)sc); bios_key_put((u16)(sc << 8)); rt_irq_pending = 1; down = 1; rt_log("test: key %02x\n", sc); }
             else if (down && now >= (u64)(ms + hold)) { kbd_push_scancode((u8)(sc | 0x80)); rt_irq_pending = 1; down = 0; idx++; }
         }
+    }
+    {   /* while the game reads relative mouse motion (aiming on the bike, in the
+           mine cart...), capture the pointer so it never stops at the screen
+           edge; the game's menus read the cursor position and get it back */
+        extern u64 mouse_mickey_poll_time;
+        extern int video_has_focus(void);
+        int want = mouse_mickey_poll_time && now - mouse_mickey_poll_time < 400 && video_has_focus() && !getenv("AO_HIDDEN");
+        if (want != SDL_GetRelativeMouseMode()) SDL_SetRelativeMouseMode(want ? SDL_TRUE : SDL_FALSE);
+    }
+    {   /* AO_MOUSE=ms:dx:dy[;...]: scripted relative mouse moves (test runs) */
+        static char script[512];
+        static int init, idx;
+        if (!init) { const char *e = getenv("AO_MOUSE"); if (e) snprintf(script, sizeof script, "%s", e); init = 1; }
+        const char *p = script;
+        for (int k = 0; k < idx && p; k++) { p = strchr(p, ';'); if (p) p++; }
+        int ms, dx, dy;
+        if (p && *p && sscanf(p, "%d:%d:%d", &ms, &dx, &dy) == 3 && now >= (u64)ms) { mouse_motion(dx, dy); idx++; rt_log("test: mouse %d,%d\n", dx, dy); }
     }
     while (SDL_PollEvent(&ev)) {
         switch (ev.type) {
@@ -167,6 +184,7 @@ void input_pump(void)
         case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: {
             int b = ev.button.button == SDL_BUTTON_LEFT ? 1 : ev.button.button == SDL_BUTTON_RIGHT ? 2 : ev.button.button == SDL_BUTTON_MIDDLE ? 4 : 0;
             if (ev.type == SDL_MOUSEBUTTONDOWN) { mouse_buttons |= b; mouse_press_time(b); } else mouse_buttons &= ~b;
+            { extern void mouse_button_event(int b, int down); mouse_button_event(b, ev.type == SDL_MOUSEBUTTONDOWN); }
             break;
         }
         default: break;

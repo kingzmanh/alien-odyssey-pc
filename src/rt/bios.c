@@ -166,8 +166,29 @@ void rt_int10(void)
 static int mx_min = 0, mx_max = 639, my_min = 0, my_max = 479;
 static int mick_x, mick_y;
 static int last_raw_x, last_raw_y;
+static int press_n[3], release_n[3];
+u64 mouse_mickey_poll_time;   /* when the game last read relative motion (aiming) */
 
-void mouse_motion(int dx, int dy) { mick_x += dx; mick_y += dy; }
+/* relative motion for int 33h/0Bh: raw Windows counts scaled by the
+   sensitivity option.  The game moves its crosshair one screen pixel per
+   count, made for ~400 cpi mice of 1995; today's mice report 4x as many
+   counts, so 100% gives the game a quarter of them */
+void mouse_motion(int dx, int dy)
+{
+    extern int opt_mouse_sens, opt_mouse_invert;
+    static int fx, fy;   /* fractions, in 1/100 counts */
+    fx += dx * opt_mouse_sens;
+    fy += (opt_mouse_invert ? -dy : dy) * opt_mouse_sens;
+    mick_x += fx / 400; fx %= 400;
+    mick_y += fy / 400; fy %= 400;
+}
+
+/* button press / release counters for int 33h/05h, 06h */
+void mouse_button_event(int b, int down)
+{
+    for (int i = 0; i < 3; i++)
+        if (b & (1 << i)) { if (down) press_n[i]++; else release_n[i]++; }
+}
 
 /* move the cursor (driver coordinates) - also moves the Windows pointer */
 static void mouse_set_pos(int x, int y)
@@ -206,7 +227,28 @@ void rt_int33(void)
     case 0x04: mouse_set_pos((s16)CX, (s16)DX); break;
     case 0x07: mx_min = (s16)CX; mx_max = (s16)DX; break;
     case 0x08: my_min = (s16)CX; my_max = (s16)DX; break;
-    case 0x0b: input_pump(); SETCX(mick_x); SETDX(mick_y); mick_x = mick_y = 0; break;
+    case 0x05: case 0x06: {   /* button press / release information */
+        int b = BX & 3;
+        int *cnt = AX == 5 ? press_n : release_n;
+        int x, y;
+        input_pump();
+        mouse_pos(&x, &y);
+        { extern int mouse_buttons_reported(void); SETAX(mouse_buttons_reported()); }
+        SETBX(b < 3 ? cnt[b] : 0);
+        if (b < 3) cnt[b] = 0;
+        SETCX(x); SETDX(y);
+        break;
+    }
+    case 0x0b: {
+        extern u64 SDL_GetTicks64(void);
+        input_pump();
+        int cx = mick_x < -32768 ? -32768 : mick_x > 32767 ? 32767 : mick_x;
+        int dy = mick_y < -32768 ? -32768 : mick_y > 32767 ? 32767 : mick_y;
+        SETCX(cx); SETDX(dy);
+        mick_x = mick_y = 0;
+        mouse_mickey_poll_time = SDL_GetTicks64();
+        break;
+    }
     case 0x0c: case 0x14:
         rt_log("mouse: event handler %04x:%08x mask %04x (not used, polling instead)\n", cpu.sreg[S_ES], cpu.r[R_EDX], CX);
         break;

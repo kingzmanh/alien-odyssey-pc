@@ -449,7 +449,37 @@ enum {
     ID_WIN = 1500,                          /* +1..3 */
     ID_FULLSCREEN = 1510, ID_SHOWFPS, ID_VSYNC,
     ID_CONTROLS = 1700, ID_ABOUT,
+    ID_INVERTY = 1800, ID_MOUSEAIM, ID_SENS = 1810,   /* +index into g_sens */
 };
+static const int g_sens[] = {25, 50, 75, 100, 150, 200, 300, 400};
+extern int opt_mouse_sens, opt_mouse_invert;
+
+int video_has_focus(void) { return win && (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS); }
+
+/* the game's own control setting, "Controller N" in C:\GAME.CFG (0 = mouse,
+   1 joystick, 2 keyboard, 3 joypad); each part of the game reads it when it
+   starts, and the game's options menu writes it */
+static int game_controller(int set)
+{
+    char p[700], line[256], out[8192] = "";
+    snprintf(p, sizeof p, "%s\\hd\\GAME.CFG", rt_root);
+    FILE *f = fopen(p, "rb");
+    if (!f) return -1;
+    int cur = -1;
+    size_t o = 0;
+    while (fgets(line, sizeof line, f)) {
+        int v;
+        if (sscanf(line, "Controller %d", &v) == 1) {
+            cur = v;
+            if (set >= 0) snprintf(line, sizeof line, "Controller %d\r\n", set);
+        }
+        size_t n = strlen(line);
+        if (o + n < sizeof out) { memcpy(out + o, line, n); o += n; }
+    }
+    fclose(f);
+    if (set >= 0 && cur >= 0 && (f = fopen(p, "wb"))) { fwrite(out, 1, o, f); fclose(f); cur = set; }
+    return cur;
+}
 
 static void update_checks(void)
 {
@@ -461,13 +491,16 @@ static void update_checks(void)
     CheckMenuItem(g_menu, ID_FXAA, MF_BYCOMMAND | (opt_fxaa ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_menu, ID_FULLSCREEN, MF_BYCOMMAND | (opt_fullscreen ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_menu, ID_SHOWFPS, MF_BYCOMMAND | (opt_showfps ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_menu, ID_INVERTY, MF_BYCOMMAND | (opt_mouse_invert ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_menu, ID_MOUSEAIM, MF_BYCOMMAND | (game_controller(-1) == 0 ? MF_CHECKED : MF_UNCHECKED));
+    for (int i = 0; i < 8; i++) CheckMenuItem(g_menu, ID_SENS + i, MF_BYCOMMAND | (g_sens[i] == opt_mouse_sens ? MF_CHECKED : MF_UNCHECKED));
 }
 
 static HMENU build_menu(void)
 {
     HMENU bar = CreateMenu(), video = CreatePopupMenu(), res = CreatePopupMenu(), asp = CreatePopupMenu(),
           filt = CreatePopupMenu(), sharp = CreatePopupMenu(), view = CreatePopupMenu(), winm = CreatePopupMenu(),
-          help = CreatePopupMenu();
+          help = CreatePopupMenu(), input = CreatePopupMenu(), sens = CreatePopupMenu();
     static const wchar_t *cls[7] = {L"", L"  Native", L"  480p-class", L"  720p-class", L"  1080p-class", L"  1440p-class", L"  4K-class"};
     for (int s = 1; s <= 6; s++) {
         wchar_t t[96];
@@ -497,10 +530,20 @@ static HMENU build_menu(void)
     AppendMenuW(view, MF_STRING, ID_FULLSCREEN, L"&Fullscreen\tAlt+Enter");
     AppendMenuW(view, MF_SEPARATOR, 0, NULL);
     AppendMenuW(view, MF_STRING, ID_SHOWFPS, L"Show FPS in title");
+    for (int i = 0; i < 8; i++) {
+        wchar_t t[32];
+        swprintf(t, 32, L"%d%%%ls", g_sens[i], g_sens[i] == 100 ? L"  (default)" : L"");
+        AppendMenuW(sens, MF_STRING, ID_SENS + i, t);
+    }
+    AppendMenuW(input, MF_STRING, ID_MOUSEAIM, L"&Mouse aiming  (aim with the mouse, left button fires; from the next part of the game)");
+    AppendMenuW(input, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(input, MF_POPUP, (UINT_PTR)sens, L"Mouse &sensitivity");
+    AppendMenuW(input, MF_STRING, ID_INVERTY, L"&Invert mouse Y");
     AppendMenuW(help, MF_STRING, ID_CONTROLS, L"&Controls...");
     AppendMenuW(help, MF_STRING, ID_ABOUT, L"&About...");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)video, L"&Video");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)view, L"Vie&w");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)input, L"&Input");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"&Help");
     return bar;
 }
@@ -535,12 +578,17 @@ void video_menu_command(int id)
     else if (id >= ID_FILTER && id <= ID_FILTER + 3) opt_filter = id - ID_FILTER;
     else if (id >= ID_SHARP && id <= ID_SHARP + 3) opt_sharpen = id - ID_SHARP;
     else if (id == ID_FXAA) opt_fxaa = !opt_fxaa;
+    else if (id == ID_INVERTY) opt_mouse_invert = !opt_mouse_invert;
+    else if (id == ID_MOUSEAIM) game_controller(game_controller(-1) == 0 ? 2 : 0);
+    else if (id >= ID_SENS && id < ID_SENS + 8) opt_mouse_sens = g_sens[id - ID_SENS];
     else if (id > ID_WIN && id <= ID_WIN + 3) { set_client_size(640 * (id - ID_WIN), 480 * (id - ID_WIN)); return; }
     else if (id == ID_FULLSCREEN) { video_set_fullscreen(!opt_fullscreen); return; }
     else if (id == ID_SHOWFPS) { opt_showfps = !opt_showfps; if (!opt_showfps) SDL_SetWindowTitle(win, "Alien Odyssey"); }
     else if (id == ID_CONTROLS) {
         MessageBoxA(hwnd,
                     "The game's own controls, as on DOS (GAME.CFG holds the key layout):\n\n"
+                    "Mouse - aim on the bike and in the mine cart, left button fires\n"
+                    "    (Input > Mouse aiming switches the game's own control setting)\n"
                     "Arrow keys - move / steer / aim\n"
                     "Ctrl, Space, Z, X, Shift, Alt - actions (see the manual)\n"
                     "Esc - menu / skip\n\n"
