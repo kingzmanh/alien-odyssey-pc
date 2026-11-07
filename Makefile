@@ -35,7 +35,7 @@ OBJS := $(patsubst src/%.c,$(B)/%.o,$(GEN_SRCS) $(RT_SRCS))
 all: $(EXE)
 
 $(EXE): $(OBJS) $(RES_OBJ)
-	$(CC) -mwindows -o $@ $^ -static $(SDL_LIBS) -lwinmm -lm
+	$(CC) -mwindows -o $@ $^ -static $(SDL_LIBS) -ld3d9 -lwinmm -lm
 
 $(B)/odyssey.ico: $(ICON_SRC) tools/make_icon.py tools/lbm.py
 	$(PY) tools/make_icon.py $< $@
@@ -71,7 +71,7 @@ release: build/release/odyssey.exe build/setup.exe
 
 build/release/odyssey.exe: $(OBJS)
 	@mkdir -p build/release
-	$(CC) -mwindows -o $@ $^ -static $(SDL_LIBS) -lwinmm -lm
+	$(CC) -mwindows -o $@ $^ -static $(SDL_LIBS) -ld3d9 -lwinmm -lm
 	strip $@
 
 SETUP_SRCS := installer/setup.c installer/install.c installer/cdsrc.c installer/util.c

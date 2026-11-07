@@ -137,6 +137,14 @@ void input_pump(void)
                 settings_save_fullscreen();
                 break;
             }
+            {   /* F9..F12: display options (not passed to the game) */
+                extern int video_hotkey(int sdl_scancode);
+                SDL_Scancode k = ev.key.keysym.scancode;
+                if (k == SDL_SCANCODE_F9 || k == SDL_SCANCODE_F10 || k == SDL_SCANCODE_F11 || k == SDL_SCANCODE_F12) {
+                    if (ev.type == SDL_KEYDOWN && !ev.key.repeat) video_hotkey(k);
+                    break;
+                }
+            }
             for (size_t i = 0; i < sizeof keymap / sizeof keymap[0]; i++)
                 if (keymap[i].s == ev.key.keysym.scancode) {
                     u8 sc = keymap[i].sc;
@@ -152,9 +160,8 @@ void input_pump(void)
             break;
         }
         case SDL_MOUSEMOTION: {
-            /* window -> logical coordinates are already applied by SDL_RenderSetLogicalSize */
-            mouse_x = ev.motion.x; mouse_y = ev.motion.y;
-            if (video_h && video_w == 320) mouse_y = mouse_y * 200 / 240;
+            extern void video_window_to_game(int wx, int wy, int *gx, int *gy);
+            video_window_to_game(ev.motion.x, ev.motion.y, &mouse_x, &mouse_y);
             if (mouse_x < 0) mouse_x = 0;
             if (mouse_y < 0) mouse_y = 0;
             if (video_w && mouse_x >= video_w) mouse_x = video_w - 1;

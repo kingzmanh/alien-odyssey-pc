@@ -20,6 +20,10 @@ Scripted install: `"Alien Odyssey PC Setup.exe" /silent /cd <iso|cue|drive|folde
 ## Playing
 
 - Starts in fullscreen; **Alt+Enter** switches to a window and back (remembered in `odyssey_pc.ini`).
+- Picture (Direct3D 9, same post chain as our Xbox ports): the game draws at 320x200 and is brought up
+  to your screen with a choice of filter - **F9** nearest / bilinear / bicubic / sharp bilinear -,
+  **F10** contrast-adaptive sharpening (off/low/medium/high), **F11** FXAA, **F12** aspect
+  (4:3 / stretch / whole pixels). Defaults: bicubic + medium sharpening, 4:3. Saved in `odyssey_pc.ini`.
 - Keyboard as in the original (`GAME.CFG` holds the key layout, as on DOS).
 - Speech, sound effects and the FMV soundtracks through a software mixer; music through the
   Windows General MIDI synthesizer (the game's General MIDI arrangements).
