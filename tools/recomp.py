@@ -889,6 +889,12 @@ class Gen:
         p = self.p
         self.ds_based = self.writes_ds(f)
         la = self.liveness(f)
+        # multi-entry function (computed jump into its own code): every
+        # instruction is a jump target, all flags live everywhere
+        allins = sorted(set(a for l in f.blocks.values() for a in l)) if f.multi else []
+        if f.multi:
+            la = {}
+        labels = set()
         out = ['void ' + PFX + '%x(void)' % f.entry, '{', '    LOCALS;',
                '    u32 ret_expect = rt_tail_ret ? rt_tail_ret : RD32(esp); rt_tail_ret = 0; (void)ret_expect;']
         if f.entry in TRACE:
@@ -898,7 +904,9 @@ class Gen:
             out.append('    goto L_%x;' % f.entry)
         for bi, b in enumerate(order):
             l = f.blocks[b]
-            out.append('L_%x:' % b)
+            if b not in labels:
+                out.append('L_%x:' % b)
+                labels.add(b)
             if not l:
                 out.append('    rt_bad_code(0x%x);' % b)
                 continue
@@ -907,6 +915,9 @@ class Gen:
                 m = ins.mnemonic
                 nxt = a + ins.size
                 L = la.get(a, ALL)
+                if f.multi and a not in labels:
+                    out.append('L_%x:' % a)
+                    labels.add(a)
                 if m in JCC:
                     t = ins.operands[0].imm & 0xffffffff
                     if m in ('jcxz', 'jecxz'):
@@ -935,6 +946,11 @@ class Gen:
                     elif a in f.tables:
                         out.append('    { u32 t = %s; switch (t) {' % self.rd(ins, op, 4))
                         for t in sorted(set(f.tables[a])):
+                            out.append('    case 0x%xu: goto L_%x;' % (t, t))
+                        out.append('    default: SYNC_OUT; rt_tail_ret = ret_expect; rt_jump(t, 0x%x); return; } }' % a)
+                    elif f.multi:
+                        out.append('    { u32 t = %s; switch (t) {' % self.rd(ins, op, 4))
+                        for t in allins:
                             out.append('    case 0x%xu: goto L_%x;' % (t, t))
                         out.append('    default: SYNC_OUT; rt_tail_ret = ret_expect; rt_jump(t, 0x%x); return; } }' % a)
                     else:

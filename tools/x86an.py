@@ -78,6 +78,7 @@ class Func:
         self.bad = []
         self.has_ret = False
         self.calls = set()
+        self.multi = False
 
 
 def is_exit_int(p, lst):
@@ -150,6 +151,12 @@ def descend(p, e, entries, noreturn, tables_out, strict=False):
                         if tb:
                             f.tables[a] = tb
                             succ += tb
+                    if a not in f.tables and not strict:
+                        # computed jump (e.g. into an unrolled loop that follows it):
+                        # the function becomes multi-entry, keep decoding after it
+                        f.multi = True
+                        if p.insn(nxt) is not None:
+                            succ.append(nxt)
                 break
             if m in ('ret', 'iretd', 'iret', 'retf'):
                 f.has_ret = True
