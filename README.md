@@ -8,6 +8,24 @@ video hardware and the game's launcher with Windows services.
 **This repository contains no game files and no game code.** You need your own Alien Odyssey CD
 (the disc, an ISO / BIN+CUE image, or a copied folder).
 
+![DOS original vs PC Native](docs/screenshots/before-after.jpg)
+
+**What you get:** the whole game (intro, forest bike ride, villages, mine, the 3D adventure) as one
+Windows program; the 3D scenes really rendered at up to 1920x1200; an xBR upscaler for the
+pre-rendered pictures and videos; the game's text redrawn in a smooth font; widescreen that removes
+the black bars without stretching or cutting; mouse aiming on the bike; a Video menu like our Xbox ports.
+
+| | |
+|---|---|
+| ![Bike ride](docs/screenshots/bike-ride.jpg) | ![Bike combat](docs/screenshots/bike-combat.jpg) |
+| Cut-scenes fill a 16:9 screen (the bike ride is exactly 16:9 once the black bars are gone) | Bike combat with mouse aiming |
+| ![HD text](docs/screenshots/hd-text.jpg) | ![Night cut-scene](docs/screenshots/cutscene-night.jpg) |
+| HD text over the game | Subtitles in the smooth font |
+| ![Dak base](docs/screenshots/base.jpg) | ![After you](docs/screenshots/after-you.jpg) |
+| The Dak base | |
+| ![Bunker cut-scene](docs/screenshots/bunker-cutscene.jpg) | ![Bunker](docs/screenshots/bunker.jpg) |
+| Bunker cut-scene, 3D rendered at 6x | The 3D adventure: pre-rendered rooms, 3D characters at high resolution |
+
 ## Installing
 
 Run **`Alien Odyssey PC Setup.exe`**, point it at your CD, choose a folder, press Install. It copies
