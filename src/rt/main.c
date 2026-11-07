@@ -324,7 +324,7 @@ static int run_program(const char *name, const char *args)
     dpmi_init();
     dos_reset();
     sound_reset();
-    { extern void hires3d_reset(void); hires3d_reset(); }
+    { extern void hires3d_reset(void); hires3d_reset(); hdtext_reset(); }
     rt_functab = m->tab;
     rt_nfuncs = *m->n;
     cur_wrap = m->wrap;

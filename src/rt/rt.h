@@ -32,6 +32,18 @@ typedef struct {
 } LoadInfo;
 int le_load(const char *path, LoadInfo *li);
 
+/* HD text (hdtext.c -> video.c): a character still on the screen; cell and
+   ink box in game pixels, colours as palette indices */
+typedef struct {
+    short x, y, w, h;          /* glyph cell */
+    short ix, iy, iw, ih;      /* box of the glyph's pixels */
+    unsigned char ch, colour;  /* character, its most common colour */
+    const unsigned char *pre;  /* w*h: the screen under the glyph before it was drawn */
+    const short *map;          /* 256: colour it drew over each background colour, -1 unknown */
+} HdChar;
+int hdtext_visible(const unsigned char *frame, unsigned char *base, HdChar *out, int max, unsigned *gen);
+void hdtext_reset(void);
+
 /* function table */
 void (*rt_lookup(u32 addr))(void);
 void rt_call_guest(u32 addr);           /* call guest function with a fake return address */

@@ -28,6 +28,16 @@ Scripted install: `"Alien Odyssey PC Setup.exe" /silent /cd <iso|cue|drive|folde
   - *Upscale Filter*: **xBR** (default; edge-directed pixel-art upscaler that redraws edges as smooth
     lines - fonts, menus, sprites stay sharp), nearest / bilinear / bicubic / sharp bilinear, *Anti-aliasing (FXAA)*,
     *Sharpening* (contrast adaptive, off/low/medium/high), *Aspect Ratio* (4:3 / stretch / integer).
+  - *Widescreen*: **Zoom to the picture** (default) - most scenes (videos, cut-scenes, the bike ride,
+    the forest) have black bars above and below the picture; the view closes in on the picture, as far
+    as needed to fill a 16:9 screen, never cutting into it or stretching it (the bike ride is exactly
+    16:9). *Fill the screen* always fills the width, cutting some of the top and bottom, and pans to
+    follow the action (like the Resident Evil HD remaster). *Off* shows the whole 4:3 picture.
+  - *HD text*: the game's text (menus, subtitles) is redrawn with a smooth TrueType font at screen
+    resolution, in the colours the game drew (its see-through menu text included). Each glyph the game
+    draws is recorded (`src/rt/hdtext.c`, wrapping the glyph blitter all six programs share); while its
+    pixels are still on screen, they are replaced by what was under them and the character is drawn
+    over the finished picture. Tiny HUD fonts stay as drawn.
   - *View*: window size, fullscreen (Alt+Enter), FPS in the title. All saved in `odyssey_pc.ini`.
   - The videos and 2D screens only carry their original 320x200 pixels; they go through the filter.
 - Keyboard as in the original (`GAME.CFG` holds the key layout, as on DOS).
@@ -54,7 +64,8 @@ the (rewritten) launcher what to run next, exactly as `MCP.EXE` did.
 | The launcher (`MCP.EXE` rewritten): program sequence, passwords, save slots | `src/rt/main.c` |
 | DOS (`int 21h`) on Windows files, DPMI (`int 31h`), VGA BIOS, keyboard, MSCDEX (incl. sector reads for the FMV streams) | `src/rt/dos.c`, `dpmi.c`, `bios.c`, `cdrom.c` |
 | Timer and keyboard interrupts driven from the Windows clock and window events | `src/rt/irq.c` |
-| Window, menu, palette, Direct3D 9 presenter (xBR, bicubic, sharp bilinear, FXAA, CAS sharpening) | `src/rt/video.c` |
+| Window, menu, palette, Direct3D 9 presenter (xBR, bicubic, sharp bilinear, FXAA, CAS sharpening, widescreen, HD text layer) | `src/rt/video.c` |
+| HD text: the glyph blitter of all six programs wrapped, characters recorded with what was under them | `src/rt/hdtext.c` |
 | Higher internal resolution of the 3D game (BRender scene rendered again at N x size) | `src/rt/hires3d.c` |
 | Miles Sound System (AIL 3) replaced at its API: sample mixer, streaming, XMIDI player on Windows MIDI | `src/rt/native_ail.c`, mapping per program by `tools/gen_ail_natives.py` |
 | Native code for routines that modify themselves or jump into their own unrolled loops (BRP video frame decoders, the mine's texture floor) | `src/rt/native.c`, `tools/native_<module>.txt` |

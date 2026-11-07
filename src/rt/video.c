@@ -19,6 +19,8 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <string.h>
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
@@ -43,6 +45,7 @@ static u32 *rgb_hi;
 static int rgb_hi_n;
 static HMENU g_menu;
 static HMENU build_menu(void);
+static void set_client_size(int w, int h);
 static void update_checks(void);
 extern void settings_save_video(void);
 
@@ -241,6 +244,11 @@ static IDirect3DPixelShader9 *mk_ps(const char *src)
     return ps;
 }
 
+static IDirect3DTexture9 *tx_tex;      /* HD text layer */
+static UINT tx_w, tx_h;
+static unsigned tx_gen = ~0u;
+static float tx_v0 = -1, tx_v1 = -1;
+
 static void release_targets(void)
 {
     if (src_tex) { IDirect3DTexture9_Release(src_tex); src_tex = NULL; }
@@ -249,7 +257,9 @@ static void release_targets(void)
     if (up_surf) { IDirect3DSurface9_Release(up_surf); up_surf = NULL; }
     if (up_tex) { IDirect3DTexture9_Release(up_tex); up_tex = NULL; }
     if (ov_tex) { IDirect3DTexture9_Release(ov_tex); ov_tex = NULL; }
-    src_w = src_h = up_w = up_h = ov_w = ov_h = 0;
+    if (tx_tex) { IDirect3DTexture9_Release(tx_tex); tx_tex = NULL; }
+    src_w = src_h = up_w = up_h = ov_w = ov_h = tx_w = tx_h = 0;
+    tx_gen = ~0u;
 }
 
 static void desktop_size(UINT *w, UINT *h)
@@ -323,6 +333,11 @@ static int ensure_targets(UINT sw, UINT sh, UINT ow, UINT oh)
     return 1;
 }
 
+/* widescreen: the rows of the game's picture that are shown (fractions of
+   its height); passes that read the game's picture use [bv0, bv1] */
+static float g_v0 = 0, g_v1 = 1, bv0 = 0, bv1 = 1;
+extern int opt_widescreen, opt_hdtext;
+
 /* draw texture src (sw x sh) into the viewport of the current target with ps */
 static void blit(IDirect3DTexture9 *src, UINT sw, UINT sh, IDirect3DPixelShader9 *ps, D3DVIEWPORT9 vp, int linear)
 {
@@ -335,7 +350,7 @@ static void blit(IDirect3DTexture9 *src, UINT sw, UINT sh, IDirect3DPixelShader9
     IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)src);
     IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MINFILTER, linear ? D3DTEXF_LINEAR : D3DTEXF_POINT);
     IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAGFILTER, linear ? D3DTEXF_LINEAR : D3DTEXF_POINT);
-    float q[4][4] = {{-1, 1, 0, 0}, {1, 1, 1, 0}, {-1, -1, 0, 1}, {1, -1, 1, 1}};
+    float q[4][4] = {{-1, 1, 0, bv0}, {1, 1, 1, bv0}, {-1, -1, 0, bv1}, {1, -1, 1, bv1}};
     IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, 16);
 }
 
@@ -347,9 +362,10 @@ static void dest_rect(UINT cw, UINT ch, UINT *dx, UINT *dy, UINT *dw, UINT *dh)
     UINT aw = 4, ah = 3;
     if (sw * 3 == sh * 4) { aw = 4; ah = 3; }
     *dx = 0; *dy = 0; *dw = cw; *dh = ch;
-    if (opt_aspect == 0) {          /* 4:3, as large as fits */
-        if (cw * ah > ch * aw) { *dw = ch * aw / ah; *dx = (cw - *dw) / 2; }
-        else { *dh = cw * ah / aw; *dy = (ch - *dh) / 2; }
+    if (opt_aspect == 0) {          /* 4:3, as large as fits (widescreen: only the rows shown, same pixel shape) */
+        double a = (double)aw / ah / (g_v1 - g_v0);
+        if (cw > ch * a) { *dw = (UINT)(ch * a + 0.5); if (*dw > cw) *dw = cw; *dx = (cw - *dw) / 2; }
+        else { *dh = (UINT)(cw / a + 0.5); if (*dh > ch) *dh = ch; *dy = (ch - *dh) / 2; }
     } else if (opt_aspect == 2) {   /* whole multiples of the game's pixels (square pixels) */
         UINT k = cw / sw < ch / sh ? cw / sw : ch / sh;
         if (k < 1) k = 1;
@@ -362,7 +378,168 @@ static void dest_rect(UINT cw, UINT ch, UINT *dx, UINT *dy, UINT *dw, UINT *dh)
     if (!*dh) *dh = 1;
 }
 
-static void d3d_present(const u32 *pix, int w, int h, const u32 *ov, int ow, int oh)
+/* ---------------- HD text ----------------
+   The game's characters drawn with a TrueType font at output resolution
+   into a premultiplied-alpha layer that goes over the finished picture. */
+
+typedef struct { HFONT f; int h, w; double cap; } FontC;
+static FontC fcache[24];
+static int fcache_n;
+static HDC tdc;
+
+static HFONT get_font(int h, int w)
+{
+    for (int i = 0; i < fcache_n; i++) if (fcache[i].h == h && fcache[i].w == w) return fcache[i].f;
+    if (fcache_n == 24) { for (int i = 0; i < 24; i++) DeleteObject(fcache[i].f); fcache_n = 0; }
+    HFONT f = CreateFontA(-h, w, 0, 0, FW_SEMIBOLD, 0, 0, 0, ANSI_CHARSET, OUT_TT_ONLY_PRECIS, 0, ANTIALIASED_QUALITY,
+                          VARIABLE_PITCH | FF_SWISS, "Bahnschrift SemiCondensed");
+    fcache[fcache_n].f = f; fcache[fcache_n].h = h; fcache[fcache_n].w = w;
+    fcache_n++;
+    return f;
+}
+
+static const MAT2 mat_id = {{0, 1}, {0, 0}, {0, 0}, {0, 1}};
+
+/* cap height of the font as a fraction of its em size */
+static double font_cap_ratio(void)
+{
+    static double r;
+    if (r) return r;
+    SelectObject(tdc, get_font(200, 0));
+    GLYPHMETRICS gm;
+    r = GetGlyphOutlineA(tdc, 'H', GGO_METRICS, &gm, 0, NULL, &mat_id) != GDI_ERROR && gm.gmBlackBoxY ? gm.gmBlackBoxY / 200.0 : 0.7;
+    return r;
+}
+
+static void build_text(const HdChar *c, int n, UINT dw, UINT dh)
+{
+    static HBITMAP bmp;
+    static u32 *bits, *lay;
+    static UINT bw, bh;
+    if (!tdc) tdc = CreateCompatibleDC(NULL);
+    if (bw != dw || bh != dh) {
+        if (bmp) DeleteObject(bmp);
+        BITMAPINFO bi = {{sizeof(BITMAPINFOHEADER), (LONG)dw, -(LONG)dh, 1, 32, BI_RGB}};
+        bmp = CreateDIBSection(tdc, &bi, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
+        SelectObject(tdc, bmp);
+        free(lay);
+        lay = malloc((size_t)dw * dh * 4);
+        bw = dw; bh = dh;
+    }
+    if (!bits || !lay) return;
+    memset(bits, 0, (size_t)dw * dh * 4);
+    memset(lay, 0, (size_t)dw * dh * 4);
+    SetBkMode(tdc, TRANSPARENT);
+    SetTextAlign(tdc, TA_BASELINE | TA_LEFT);
+    SetTextColor(tdc, RGB(255, 255, 255));
+    double sx = (double)dw / 320.0, sy = (double)dh / ((g_v1 - g_v0) * 200.0), top = g_v0 * 200.0;
+    /* the cap height of each font (fonts told apart by their cell height):
+       the tallest capital letter on screen in that font */
+    int capg[49] = {0}, anyg[49] = {0};
+    for (int i = 0; i < n; i++) {
+        int h = c[i].h > 48 ? 48 : c[i].h;
+        if (c[i].ch >= 'A' && c[i].ch <= 'Z' && c[i].ch != 'Q' && c[i].ch != 'J' && c[i].ih > capg[h]) capg[h] = c[i].ih;
+        if (c[i].ih > anyg[h]) anyg[h] = c[i].ih;
+    }
+    double cr = font_cap_ratio();
+    for (int i = 0; i < n; i++) {
+        const HdChar *k = &c[i];
+        if (k->ch <= ' ' || k->ch > '~') continue;
+        double iy0 = (k->iy - top) * sy, iy1 = (k->iy + k->ih - top) * sy;
+        if (iy1 < 0 || iy0 > dh) continue;
+        int hh = k->h > 48 ? 48 : k->h;
+        double cap = capg[hh] ? capg[hh] : anyg[hh] * 0.8;
+        if (cap < 3) cap = k->h * 0.7;
+        int fh = (int)(cap * sy / cr + 0.5);
+        if (fh < 6) fh = 6;
+        char t = (char)k->ch;
+        HFONT f = get_font(fh, 0);
+        SelectObject(tdc, f);
+        GLYPHMETRICS gm;
+        if (GetGlyphOutlineA(tdc, (UINT)(u8)t, GGO_METRICS, &gm, 0, NULL, &mat_id) == GDI_ERROR) continue;
+        double inkw = k->iw * sx;
+        if (gm.gmBlackBoxX > inkw * 1.2 + 2) {   /* wider than the original: a narrower cut of the font */
+            TEXTMETRICA tm;
+            GetTextMetricsA(tdc, &tm);
+            int fw = (int)(tm.tmAveCharWidth * (inkw * 1.1 + 1) / gm.gmBlackBoxX);
+            if (fw < 1) fw = 1;
+            SelectObject(tdc, get_font(fh, fw));
+            GetGlyphOutlineA(tdc, (UINT)(u8)t, GGO_METRICS, &gm, 0, NULL, &mat_id);
+        }
+        /* the font's ink box goes where the original's was: centred
+           horizontally, standing on the same bottom line */
+        double cx = (k->ix + k->iw * 0.5) * sx;
+        int ox = (int)(cx - (gm.gmptGlyphOrigin.x + gm.gmBlackBoxX * 0.5) + 0.5);
+        int by = (int)(iy1 + gm.gmptGlyphOrigin.y - (int)gm.gmBlackBoxY + 0.5);
+        int rx0 = ox + gm.gmptGlyphOrigin.x - 2, ry0 = by - gm.gmptGlyphOrigin.y - 2;
+        int rx1 = rx0 + (int)gm.gmBlackBoxX + 5, ry1 = ry0 + (int)gm.gmBlackBoxY + 5;
+        if (rx0 < 0) rx0 = 0;
+        if (ry0 < 0) ry0 = 0;
+        if (rx1 > (int)dw) rx1 = dw;
+        if (ry1 > (int)dh) ry1 = dh;
+        if (rx0 >= rx1 || ry0 >= ry1) continue;
+        for (int y = ry0; y < ry1; y++) memset(bits + (size_t)y * dw + rx0, 0, (rx1 - rx0) * 4);
+        TextOutA(tdc, ox, by, &t, 1);
+        GdiFlush();
+        /* colour per pixel, as the game drew it: its font colour over each
+           background colour (translucent fonts take the background's tint);
+           backgrounds it never drew over get the nearest known one */
+        u32 tab[256];
+        {
+            int known[256], nk = 0;
+            for (int v = 0; v < 256; v++) if (k->map[v] >= 0) known[nk++] = v;
+            for (int v = 0; v < 256; v++) {
+                int m = k->map[v];
+                if (m < 0 && nk) {
+                    u32 pv = pal32[v];
+                    int bd = 1 << 30;
+                    for (int q = 0; q < nk; q++) {
+                        u32 pq = pal32[known[q]];
+                        int dr = (int)((pv >> 16) & 255) - (int)((pq >> 16) & 255), dg = (int)((pv >> 8) & 255) - (int)((pq >> 8) & 255), db = (int)(pv & 255) - (int)(pq & 255);
+                        int d = dr * dr + dg * dg + db * db;
+                        if (d < bd) { bd = d; m = k->map[known[q]]; }
+                    }
+                }
+                tab[v] = pal32[m >= 0 ? m : k->colour];
+            }
+        }
+        for (int y = ry0; y < ry1; y++) {
+            const u32 *src = bits + (size_t)y * dw;
+            u32 *d = lay + (size_t)y * dw;
+            int gy = (int)(y / sy + top) - k->y;
+            if (gy < 0) gy = 0;
+            if (gy >= k->h) gy = k->h - 1;
+            for (int x = rx0; x < rx1; x++) {
+                u32 a = src[x] & 255;
+                if (!a) continue;
+                int gx = (int)(x / sx) - k->x;
+                if (gx < 0) gx = 0;
+                if (gx >= k->w) gx = k->w - 1;
+                u32 col = tab[k->pre[gy * k->w + gx]];
+                u32 cr8 = (col >> 16) & 255, cg8 = (col >> 8) & 255, cb8 = col & 255;
+                u32 v = d[x], ia = 255 - a;
+                u32 na = a + (((v >> 24) * ia) >> 8);
+                u32 nr = ((cr8 * a) >> 8) + ((((v >> 16) & 255) * ia) >> 8);
+                u32 ng = ((cg8 * a) >> 8) + ((((v >> 8) & 255) * ia) >> 8);
+                u32 nb = ((cb8 * a) >> 8) + (((v & 255) * ia) >> 8);
+                d[x] = (na > 255 ? 255 : na) << 24 | nr << 16 | ng << 8 | nb;
+            }
+        }
+    }
+    if (tx_w != dw || tx_h != dh) {
+        if (tx_tex) { IDirect3DTexture9_Release(tx_tex); tx_tex = NULL; }
+        tx_w = tx_h = 0;
+        if (SUCCEEDED(IDirect3DDevice9_CreateTexture(dev, dw, dh, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tx_tex, NULL))) { tx_w = dw; tx_h = dh; }
+    }
+    D3DLOCKED_RECT lr;
+    if (tx_tex && SUCCEEDED(IDirect3DTexture9_LockRect(tx_tex, 0, &lr, NULL, D3DLOCK_DISCARD))) {
+        for (UINT y = 0; y < dh; y++) memcpy((u8 *)lr.pBits + y * lr.Pitch, lay + (size_t)y * dw, dw * 4);
+        IDirect3DTexture9_UnlockRect(tx_tex, 0);
+    }
+}
+
+static void d3d_present(const u32 *pix, int w, int h, const u32 *ov, int ow, int oh,
+                        const HdChar *chars, int nchars, unsigned cgen)
 {
     HRESULT hr = IDirect3DDevice9_TestCooperativeLevel(dev);
     if (hr == D3DERR_DEVICELOST) return;
@@ -419,13 +596,15 @@ static void d3d_present(const u32 *pix, int w, int h, const u32 *ov, int ow, int
         /* upscale into the output-sized target */
         IDirect3DDevice9_SetRenderTarget(dev, 0, up_surf);
         D3DVIEWPORT9 vu = {0, 0, dw, dh, 0, 1};
+        float vscale = (float)(dh / (h * (double)(g_v1 - g_v0)));
+        bv0 = g_v0; bv1 = g_v1;
         if (opt_filter == 4 && ps_xbr) {
-            float k[4] = {(float)dw / w, (float)dh / h, 0, 0};
+            float k[4] = {(float)dw / w, vscale, 0, 0};
             IDirect3DDevice9_SetPixelShaderConstantF(dev, 2, k, 1);
             blit(cur, w, h, ps_xbr, vu, 0);
         } else if (opt_filter == 2 && ps_bicubic) blit(cur, w, h, ps_bicubic, vu, 1);
         else if (opt_filter == 3 && ps_sharpbil) {
-            float k[4] = {(float)dw / w, (float)dh / h, 0, 0};
+            float k[4] = {(float)dw / w, vscale, 0, 0};
             IDirect3DDevice9_SetPixelShaderConstantF(dev, 2, k, 1);
             blit(cur, w, h, ps_sharpbil, vu, 1);
         } else blit(cur, w, h, ps_copy, vu, opt_filter != 0);
@@ -436,6 +615,7 @@ static void d3d_present(const u32 *pix, int w, int h, const u32 *ov, int ow, int
             blit(ov_tex, ow, oh, ps_over, vu, 1);
             IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHABLENDENABLE, FALSE);
         }
+        bv0 = 0; bv1 = 1;
         /* sharpen at output resolution, straight into the back buffer */
         IDirect3DDevice9_SetRenderTarget(dev, 0, bb);
         D3DRECT all = {0, 0, (LONG)cw, (LONG)ch};
@@ -446,6 +626,19 @@ static void d3d_present(const u32 *pix, int w, int h, const u32 *ov, int ow, int
             IDirect3DDevice9_SetPixelShaderConstantF(dev, 2, k, 1);
             blit(up_tex, dw, dh, ps_sharpen, vd, 0);
         } else blit(up_tex, dw, dh, ps_copy, vd, 0);
+        if (nchars && ps_over) {   /* HD text on top, after sharpening */
+            if (cgen != tx_gen || dw != tx_w || dh != tx_h || g_v0 != tx_v0 || g_v1 != tx_v1) {
+                build_text(chars, nchars, dw, dh);
+                tx_gen = cgen; tx_v0 = g_v0; tx_v1 = g_v1;
+            }
+            if (tx_tex) {
+                IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHABLENDENABLE, TRUE);
+                IDirect3DDevice9_SetRenderState(dev, D3DRS_SRCBLEND, D3DBLEND_ONE);
+                IDirect3DDevice9_SetRenderState(dev, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+                blit(tx_tex, dw, dh, ps_over, vd, 0);
+                IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHABLENDENABLE, FALSE);
+            }
+        }
     } else {
         D3DRECT all = {0, 0, (LONG)cw, (LONG)ch};
         IDirect3DDevice9_Clear(dev, 1, &all, D3DCLEAR_TARGET, 0, 1, 0);
@@ -482,6 +675,11 @@ void video_init(void)
     if (!opt_fullscreen) {
         SetMenu(hwnd, g_menu);
         SDL_SetWindowSize(win, 1280, 960);
+    }
+    {   /* AO_WINSIZE=WxH: client size for test runs */
+        int ww, wh;
+        const char *e = getenv("AO_WINSIZE");
+        if (e && sscanf(e, "%dx%d", &ww, &wh) == 2) set_client_size(ww, wh);
     }
     SDL_EventState(SDL_SYSWMEVENT, SDL_ENABLE);   /* menu commands arrive as WM_COMMAND */
     for (int i = 0; i < 256; i++) video_set_pal(i, i >> 2, i >> 2, i >> 2);
@@ -527,6 +725,8 @@ enum {
     ID_FULLSCREEN = 1510, ID_SHOWFPS, ID_VSYNC,
     ID_CONTROLS = 1700, ID_ABOUT,
     ID_INVERTY = 1800, ID_MOUSEAIM, ID_SENS = 1810,   /* +index into g_sens */
+    ID_WIDE = 1900,                         /* +0..2 */
+    ID_HDTEXT = 1910,
 };
 static const int g_sens[] = {25, 50, 75, 100, 150, 200, 300, 400};
 extern int opt_mouse_sens, opt_mouse_invert;
@@ -566,6 +766,8 @@ static void update_checks(void)
     CheckMenuRadioItem(g_menu, ID_FILTER, ID_FILTER + 4, ID_FILTER + opt_filter, MF_BYCOMMAND);
     CheckMenuRadioItem(g_menu, ID_SHARP, ID_SHARP + 3, ID_SHARP + opt_sharpen, MF_BYCOMMAND);
     CheckMenuItem(g_menu, ID_FXAA, MF_BYCOMMAND | (opt_fxaa ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuRadioItem(g_menu, ID_WIDE, ID_WIDE + 2, ID_WIDE + opt_widescreen, MF_BYCOMMAND);
+    CheckMenuItem(g_menu, ID_HDTEXT, MF_BYCOMMAND | (opt_hdtext ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_menu, ID_FULLSCREEN, MF_BYCOMMAND | (opt_fullscreen ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_menu, ID_SHOWFPS, MF_BYCOMMAND | (opt_showfps ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_menu, ID_INVERTY, MF_BYCOMMAND | (opt_mouse_invert ? MF_CHECKED : MF_UNCHECKED));
@@ -577,7 +779,7 @@ static HMENU build_menu(void)
 {
     HMENU bar = CreateMenu(), video = CreatePopupMenu(), res = CreatePopupMenu(), asp = CreatePopupMenu(),
           filt = CreatePopupMenu(), sharp = CreatePopupMenu(), view = CreatePopupMenu(), winm = CreatePopupMenu(),
-          help = CreatePopupMenu(), input = CreatePopupMenu(), sens = CreatePopupMenu();
+          help = CreatePopupMenu(), input = CreatePopupMenu(), sens = CreatePopupMenu(), wide = CreatePopupMenu();
     static const wchar_t *cls[7] = {L"", L"  Native", L"  480p-class", L"  720p-class", L"  1080p-class", L"  1440p-class", L"  4K-class"};
     for (int s = 1; s <= 6; s++) {
         wchar_t t[96];
@@ -601,9 +803,17 @@ static HMENU build_menu(void)
     AppendMenuW(sharp, MF_STRING, ID_SHARP + 3, L"High");
     AppendMenuW(video, MF_POPUP, (UINT_PTR)res, L"&Internal Resolution");
     AppendMenuW(video, MF_POPUP, (UINT_PTR)asp, L"&Aspect Ratio");
+    AppendMenuW(wide, MF_STRING, ID_WIDE + 0, L"Off  (the whole 4:3 picture)");
+    AppendMenuW(wide, MF_STRING, ID_WIDE + 1, L"Zoom to the picture  (removes black bars, never cuts or stretches)");
+    AppendMenuW(wide, MF_STRING, ID_WIDE + 2, L"Fill the screen  (cuts a little off the top and bottom, no stretching)");
+    AppendMenuW(wide, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(wide, MF_STRING | MF_GRAYED, 0, L"Needs Aspect Ratio: Keep aspect 4:3");
+    AppendMenuW(video, MF_POPUP, (UINT_PTR)wide, L"&Widescreen");
     AppendMenuW(video, MF_POPUP, (UINT_PTR)filt, L"Upscale &Filter");
     AppendMenuW(video, MF_STRING, ID_FXAA, L"Anti-aliasing (&FXAA)");
     AppendMenuW(video, MF_POPUP, (UINT_PTR)sharp, L"&Sharpening (contrast adaptive)");
+    AppendMenuW(video, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(video, MF_STRING, ID_HDTEXT, L"&HD text  (the game's text in a smooth font)");
     for (int k = 1; k <= 3; k++) { wchar_t t[32]; swprintf(t, 32, L"%d x %d", 640 * k, 480 * k); AppendMenuW(winm, MF_STRING, ID_WIN + k, t); }
     AppendMenuW(view, MF_POPUP, (UINT_PTR)winm, L"&Window Size");
     AppendMenuW(view, MF_STRING, ID_FULLSCREEN, L"&Fullscreen\tAlt+Enter");
@@ -657,6 +867,8 @@ void video_menu_command(int id)
     else if (id >= ID_FILTER && id <= ID_FILTER + 4) opt_filter = id - ID_FILTER;
     else if (id >= ID_SHARP && id <= ID_SHARP + 3) opt_sharpen = id - ID_SHARP;
     else if (id == ID_FXAA) opt_fxaa = !opt_fxaa;
+    else if (id >= ID_WIDE && id <= ID_WIDE + 2) { opt_widescreen = id - ID_WIDE; if (opt_widescreen) opt_aspect = 0; }
+    else if (id == ID_HDTEXT) opt_hdtext = !opt_hdtext;
     else if (id == ID_INVERTY) opt_mouse_invert = !opt_mouse_invert;
     else if (id == ID_MOUSEAIM) game_controller(game_controller(-1) == 0 ? 2 : 0);
     else if (id >= ID_SENS && id < ID_SENS + 8) opt_mouse_sens = g_sens[id - ID_SENS];
@@ -696,7 +908,85 @@ void video_window_to_game(int wx, int wy, int *gx, int *gy)
     if (!hwnd || !GetClientRect(hwnd, &cr) || !video_w) { *gx = wx; *gy = wy; return; }
     dest_rect(cr.right > 0 ? cr.right : 1, cr.bottom > 0 ? cr.bottom : 1, &dx, &dy, &dw, &dh);
     *gx = (int)(((s64)wx - dx) * video_w / dw);
-    *gy = (int)(((s64)wy - dy) * video_h / dh);
+    *gy = (int)(g_v0 * video_h + ((double)wy - dy) * video_h * (g_v1 - g_v0) / dh);
+}
+
+/* Widescreen: which rows of the game's picture to show.
+   1 "zoom to the picture": many scenes (videos, cut-scenes, the bike
+     ride) have black bars above and below the picture; the shown rows close
+     in on the picture, at most as far as needed to fill the screen's width,
+     never cutting into it and never changing the shape of the pixels.
+   2 "fill": always fill the width, rows are cut at the top and bottom
+     (kept around the picture). */
+static unsigned pal_gen;
+static void widescreen_rows(const u8 *src, u64 now)
+{
+    static int c0 = 0, c1 = 200;            /* rows shown now */
+    static int p0 = -1, p1 = -1;            /* proposed smaller range and since when */
+    static u64 p_since;
+    int H = video_h;
+    RECT cr;
+    if (!opt_widescreen || opt_aspect != 0 || !hwnd || !GetClientRect(hwnd, &cr) || cr.bottom <= 0 || video_w <= 0) {
+        g_v0 = 0; g_v1 = 1; c0 = 0; c1 = H; return;
+    }
+    if (c1 > H || c0 < 0 || c1 - c0 < 1) { c0 = 0; c1 = H; }
+    double a = (double)cr.right / cr.bottom;
+    int need = (int)ceil(H * (4.0 / 3.0) / a);   /* rows that fill the width */
+    if (need >= H) { g_v0 = 0; g_v1 = 1; c0 = 0; c1 = H; return; }
+    /* the picture's rows: not (nearly) black */
+    int t = -1, b = -1, W = video_w;
+    for (int y = 0; y < H; y++) {
+        const u8 *r = src + (size_t)y * W;
+        int lit = 0;
+        for (int x = 0; x < W; x += 2) {
+            u32 v = pal32[r[x]];
+            if (((v >> 16) & 255) + ((v >> 8) & 255) + (v & 255) > 36) { lit++; if (lit > 2) break; }
+        }
+        if (lit > 2) { if (t < 0) t = y; b = y + 1; }
+    }
+    if (t < 0) { t = c0; b = c1; }           /* all black (fade): keep */
+    int r0, r1;
+    if (opt_widescreen == 2) {
+        /* pan and scan, like the Resident Evil HD remaster: the cut window
+           follows where the picture moves (the player, the action),
+           smoothly, and stays inside the picture */
+        static u8 prev[320 * 240];
+        static double cen = -1;
+        double sum = 0, cnt = 0;
+        if (W == 320 && H <= 240) {
+            for (int y = t; y < b; y++) {
+                const u8 *r = src + (size_t)y * W, *q = prev + (size_t)y * W;
+                int d = 0;
+                for (int x = 0; x < W; x += 2) d += r[x] != q[x];
+                sum += (double)d * y; cnt += d;
+            }
+            memcpy(prev, src, (size_t)W * H);
+        }
+        double mid = (t + b) * 0.5;
+        if (cen < 0 || cen < t || cen > b) cen = mid;
+        double tgt = cnt > 40 && cnt < (b - t) * 120 ? sum / cnt : cen;   /* little or all moving: stay */
+        cen += (tgt - cen) * 0.06;
+        r0 = (int)(cen - need / 2.0 + 0.5);
+        if (b - t >= need) {
+            if (r0 < t) r0 = t;
+            if (r0 + need > b) r0 = b - need;
+        } else r0 = (int)(mid - need / 2.0);
+    } else {
+        int rows = b - t > need ? b - t : need;
+        r0 = (t + b) / 2 - rows / 2;
+        need = rows;
+    }
+    if (r0 < 0) r0 = 0;
+    if (r0 + need > H) r0 = H - need;
+    r1 = r0 + need;
+    /* bigger or moved: at once; smaller: when it has stayed so a moment
+       (no pumping when a scene briefly goes dark at the edges) */
+    if (r0 < c0 || r1 > c1 || opt_widescreen == 2) { c0 = r0; c1 = r1; p0 = -1; }
+    else if (r0 != c0 || r1 != c1) {
+        if (r0 != p0 || r1 != p1) { p0 = r0; p1 = r1; p_since = now; }
+        else if (now - p_since > 400) { c0 = r0; c1 = r1; p0 = -1; }
+    } else p0 = -1;
+    g_v0 = (float)c0 / H; g_v1 = (float)c1 / H;
 }
 
 void video_present(int force)
@@ -710,11 +1000,13 @@ void video_present(int force)
             pal32[i] = 0xff000000u | ((r << 2 | r >> 4) << 16) | ((g << 2 | g >> 4) << 8) | (b << 2 | b >> 4);
         }
         pal_dirty = 0;
+        pal_gen++;
     }
     if (!video_w || !rgb) {
         if (d3d_ok && !force) {
             u32 black = 0xff000000u;
-            d3d_present(&black, 1, 1, NULL, 0, 0);
+            g_v0 = 0; g_v1 = 1;
+            d3d_present(&black, 1, 1, NULL, 0, 0, NULL, 0, 0);
         }
         return;
     }
@@ -751,6 +1043,19 @@ void video_present(int force)
         }
     }
     int n = video_w * video_h;
+    widescreen_rows(src, now);
+    /* HD text: the characters still on screen, their low-res pixels painted
+       over with the background in a copy of the frame */
+    static HdChar chars[768];
+    static u8 base[320 * 200];
+    int nchars = 0;
+    unsigned cgen = 0;
+    if (opt_hdtext && video_w == 320 && video_h == 200 && d3d_ok) {
+        memcpy(base, src, 64000);
+        nchars = hdtext_visible(src, base, chars, 768, &cgen);
+        if (nchars) src = base;
+        cgen = cgen * 2654435761u + pal_gen;
+    }
     for (int i = 0; i < n; i++) rgb[i] = pal32[src[i]];
     {
         const u8 *hp;
@@ -759,8 +1064,8 @@ void video_present(int force)
         if (d3d_ok && video_w == 320 && hires3d_frame(&hp, &hm, &hw, &hh)) {
             if (rgb_hi_n < hw * hh) { free(rgb_hi); rgb_hi = malloc((size_t)hw * hh * 4); rgb_hi_n = hw * hh; }
             for (int i = 0; i < hw * hh; i++) rgb_hi[i] = hm[i] ? pal32[hp[i]] : (pal32[hp[i]] & 0x00ffffffu);
-            d3d_present(rgb, video_w, video_h, rgb_hi, hw, hh);
-        } else if (d3d_ok) d3d_present(rgb, video_w, video_h, NULL, 0, 0);
+            d3d_present(rgb, video_w, video_h, rgb_hi, hw, hh, chars, nchars, cgen);
+        } else if (d3d_ok) d3d_present(rgb, video_w, video_h, NULL, 0, 0, chars, nchars, cgen);
     }
     {   /* AO_SHOT=<ms>: save the game's screen to shots/ every <ms> (testing);
            AO_SHOTOUT=1 saves the final upscaled picture instead */
@@ -840,7 +1145,7 @@ void video_warp_mouse(int x, int y)
     UINT dx, dy, dw, dh;
     GetClientRect(hwnd, &cr);
     dest_rect(cr.right > 0 ? cr.right : 1, cr.bottom > 0 ? cr.bottom : 1, &dx, &dy, &dw, &dh);
-    SDL_WarpMouseInWindow(win, (int)(dx + (s64)x * dw / video_w), (int)(dy + (s64)y * dh / video_h));
+    SDL_WarpMouseInWindow(win, (int)(dx + (s64)x * dw / video_w), (int)(dy + (y - g_v0 * video_h) * dh / (video_h * (g_v1 - g_v0))));
 }
 
 /* short status message in the window title */

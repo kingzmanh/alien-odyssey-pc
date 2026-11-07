@@ -15,6 +15,8 @@ int opt_scale = 4;           /* internal resolution of the 3D game's scenes (x 3
 int opt_showfps = 0;
 int opt_mouse_sens = 100;     /* % of the Windows mouse counts given to the game */
 int opt_mouse_invert = 0;
+int opt_widescreen = 1;       /* 0 off, 1 zoom to the picture (no cutting), 2 fill the width (cuts top/bottom) */
+int opt_hdtext = 1;          /* the game's text redrawn with a smooth font */
 
 static char ini_path[700];
 
@@ -35,6 +37,11 @@ static const char default_ini[] =
     "Aspect=0\r\n"
     "; RenderScale: the 3D game renders its scenes at this multiple of 320x200 (1..6)\r\n"
     "RenderScale=4\r\n"
+    "; Widescreen: 0 off, 1 zoom to the picture (removes black bars, never cuts or stretches),\r\n"
+    ";             2 fill the screen (cuts some of the top and bottom, follows the action)\r\n"
+    "Widescreen=1\r\n"
+    "; HDText: 1 = the game's text redrawn in a smooth font at screen resolution\r\n"
+    "HDText=1\r\n"
     "ShowFPS=0\r\n"
     "SettingsVersion=2\r\n";
 
@@ -59,6 +66,8 @@ void settings_load(const char *exe_dir)
     opt_vsync = ini_int("video", "VSync", 1, 0, 1);
     opt_scale = ini_int("video", "RenderScale", 4, 1, 6);
     opt_showfps = ini_int("video", "ShowFPS", 0, 0, 1);
+    opt_widescreen = ini_int("video", "Widescreen", 1, 0, 2);
+    opt_hdtext = ini_int("video", "HDText", 1, 0, 1);
     if (ini_int("video", "SettingsVersion", 1, 0, 99) < 2) {
         /* v2: xBR became the upscaler; FXAA before it only smears the edges
            xBR needs, and strong sharpening adds halos */
@@ -91,6 +100,8 @@ void settings_save_video(void)
     put("Aspect", opt_aspect);
     put("RenderScale", opt_scale);
     put("ShowFPS", opt_showfps);
+    put("Widescreen", opt_widescreen);
+    put("HDText", opt_hdtext);
     {
         char v[16];
         snprintf(v, sizeof v, "%d", opt_mouse_sens);
