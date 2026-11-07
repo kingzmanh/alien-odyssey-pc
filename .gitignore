@@ -1,0 +1,21 @@
+# Game data and everything derived from the game's code stays out of the repo
+gamedata/
+game/
+src/gen/
+re/*
+!re/*/
+re/*/*
+!re/*/functions.tsv
+shots/
+
+# build output
+build/
+dist/
+*.exe
+*.o
+__pycache__/
+
+# local runtime files
+odyssey.log
+odyssey_pc.ini
+tools/trace.txt
