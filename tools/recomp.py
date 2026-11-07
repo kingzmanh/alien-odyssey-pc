@@ -332,6 +332,10 @@ class Gen:
         L = live_after
         a = ins.address
 
+        if mn == 'mov' and any(o.type == X.X86_OP_REG and ins.reg_name(o.reg).startswith(('cr', 'dr')) for o in ops):
+            if ops[0].type == X.X86_OP_REG and ins.reg_name(ops[0].reg).startswith(('cr', 'dr')):
+                return '; /* write to %s ignored */' % ins.reg_name(ops[0].reg)
+            return self.wr(ins, ops[0], '0x%xu' % (0x31 if ins.reg_name(ops[1].reg) == 'cr0' else 0))
         if mn == 'mov' or mn == 'movabs':
             return self.wr(ins, ops[0], self.rd(ins, ops[1], ops[0].size if ops[1].type == X.X86_OP_IMM else None))
         if mn == 'movzx':
@@ -487,19 +491,27 @@ class Gen:
             return ' '.join(o)
         if mn in ('shld', 'shrd'):
             size = ops[0].size
-            assert size == 4
+            bits = size * 8
             cnt = '(%s & 31)' % self.rd(ins, ops[2], 1)
             d = self.rd(ins, ops[0]); s = self.rd(ins, ops[1])
-            if mn == 'shld':
-                e = '(u32)((((u64)a << 32) | b) << c >> 32)'
-                cfx = '(a >> (32 - c)) & 1'
-            else:
-                e = '(u32)((((u64)b << 32) | a) >> c)'
-                cfx = '(a >> (c - 1)) & 1'
+            if size == 4:
+                if mn == 'shld':
+                    e = '(u32)((((u64)a << 32) | b) << c >> 32)'
+                    cfx = '(a >> (32 - c)) & 1'
+                else:
+                    e = '(u32)((((u64)b << 32) | a) >> c)'
+                    cfx = '(a >> (c - 1)) & 1'
+            else:   # 16-bit: counts above 16 are undefined on x86, keep them in range
+                if mn == 'shld':
+                    e = '(u32)(((((u32)a << 16) | b) << (c > 16 ? 16 : c)) >> 16) & 0xffffu'
+                    cfx = '(c <= 16 ? (a >> (16 - c)) & 1 : 0)'
+                else:
+                    e = '(u32)(((((u32)b << 16) | a) >> (c > 16 ? 16 : c))) & 0xffffu'
+                    cfx = '((a >> (c - 1)) & 1)'
             o = ['{ u32 c = %s; if (c) { u32 a = %s, b = %s; u32 r = %s;' % (cnt, d, s, e)]
             if L & CF: o.append('cf = %s;' % cfx)
-            if L & OF: o.append('of = ((a ^ r) >> 31) & 1;')
-            o.append(self.szp(L, 'r', 4))
+            if L & OF: o.append('of = ((a ^ r) >> %d) & 1;' % (bits - 1))
+            o.append(self.szp(L, 'r', size))
             o.append(self.wr(ins, ops[0], 'r'))
             o.append('} }')
             return ' '.join(o)

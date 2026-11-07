@@ -218,6 +218,7 @@ static void samp_init(Samp *s)
 /* AIL_install_DIG_INI(HDIGDRIVER *dig) -> 0 = success */
 void N_AIL_install_DIG_INI(void)
 {
+    if (getenv("AO_NODIG")) RET_V(1);   /* debugging: no digital driver */
     audio_open();
     pool_addr(0, 0);
     u32 p = ARG(0);
@@ -433,6 +434,7 @@ void N_AIL_sample_buffer_ready(void)
         SDL_LockMutex(amx);
         if (!s->stream) { s->stream = 1; s->bfull[0] = s->bfull[1] = 0; s->bnext_fill = 0; s->bcur = 0; }
         if (!s->bfull[s->bnext_fill]) r = s->bnext_fill;
+        if (getenv("AO_SNDLOG")) rt_log("snd %u: ready -> %d (full %d%d cur %d st %d pos %u)\n", SDL_GetTicks(), r, s->bfull[0], s->bfull[1], s->bcur, s->status, (u32)(s->pos >> 32));
         SDL_UnlockMutex(amx);
     }
     RET_V(r);
@@ -454,6 +456,7 @@ void N_AIL_load_sample_buffer(void)
             s->bend = 0;
         }
         s->bnext_fill = n ^ 1;
+        if (getenv("AO_SNDLOG")) rt_log("snd %u: load %u buf %08x len %u\n", SDL_GetTicks(), n, buf, len);
         if (s->status != SMP_PLAYING && len) {
             s->bcur = n;
             s->pos = 0;
