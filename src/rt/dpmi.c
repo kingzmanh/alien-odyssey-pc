@@ -84,6 +84,8 @@ u32 heap_alloc(u32 size)
     return a;
 }
 
+static void rm_vec_init(void);
+
 void dpmi_init(void)
 {
     memset(seltab, 0, sizeof seltab);
@@ -101,6 +103,7 @@ void dpmi_init(void)
     WR16(0x44a, 80);
     WR8(0x484, 24);
     { extern void irq_reset(void); irq_reset(); }
+    rm_vec_init();
 }
 
 /* ---- real-mode register structure (int31/300) ---- */
@@ -163,6 +166,18 @@ void set_es(u16 v) { if (rm_active) rm_es = v; else rt_load_seg(S_ES, v); }
 static struct { u32 addr, size; } blocks[256];
 static u32 nblocks;
 static u32 rm_vec[256];
+
+/* real-mode vectors as a DOS machine with BIOS, DOS, a mouse driver and
+   MSCDEX would have them: programs check that a vector is set before they
+   use the service (INTRO detects the mouse by its int 33h vector and falls
+   back to keyboard control, saved in GAME.CFG, when it is 0) */
+static void rm_vec_init(void)
+{
+    for (int i = 0; i < 256; i++) rm_vec[i] = 0xf000ff53u;       /* BIOS dummy iret */
+    rm_vec[0x21] = 0x0fd00500u;   /* DOS */
+    rm_vec[0x2f] = 0x0fd00600u;   /* multiplex / MSCDEX */
+    rm_vec[0x33] = 0x0fe00100u;   /* mouse driver */
+}
 
 void rt_int31(void)
 {
