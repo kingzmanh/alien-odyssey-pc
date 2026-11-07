@@ -90,6 +90,19 @@ void video_present(int force)
         }
         pal_dirty = 0;
     }
+    {   /* AO_FPS: log how many distinct frames the game drew per second (testing) */
+        static int on = -1, frames;
+        static u32 last_hash;
+        static u64 t0;
+        if (on < 0) on = getenv("AO_FPS") != NULL;
+        if (on && video_w == 320) {
+            u32 h = 2166136261u;
+            const u32 *p = (const u32 *)(MEM + VGA_WINDOW);
+            for (int i = 0; i < 16000; i += 7) h = (h ^ p[i]) * 16777619u;
+            if (h != last_hash) { frames++; last_hash = h; }
+            if (now - t0 >= 5000) { if (t0) rt_log("fps: %.1f\n", frames * 1000.0 / (now - t0)); t0 = now; frames = 0; }
+        }
+    }
     SDL_RenderClear(ren);
     if (video_w && tex) {
         const u8 *src;

@@ -130,8 +130,12 @@ static void mix(void *ud, Uint8 *stream, int len)
             u32 addr, nfr;
             if (s->stream) {
                 if (!s->bfull[s->bcur]) {
-                    if (s->bend) { s->status = SMP_DONE; s->eos_pending = 1; }
-                    break;   /* underrun: wait for the program to load a buffer */
+                    /* nothing queued: like AIL, the sample stops (it is done
+                       when the program stopped feeding it); the next
+                       load_sample_buffer starts it again */
+                    s->status = SMP_DONE;
+                    s->eos_pending = 1;
+                    break;
                 }
                 addr = s->baddr[s->bcur];
                 nfr = s->blen[s->bcur] / fb;
