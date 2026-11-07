@@ -57,7 +57,7 @@ static IDirect3DTexture9 *up_tex;           /* upscaled picture at output size *
 static IDirect3DSurface9 *up_surf;
 static UINT src_w, src_h, up_w, up_h;
 static IDirect3DVertexShader9 *vs_blit;
-static IDirect3DPixelShader9 *ps_copy, *ps_bicubic, *ps_sharpbil, *ps_fxaa, *ps_sharpen, *ps_over;
+static IDirect3DPixelShader9 *ps_copy, *ps_bicubic, *ps_sharpbil, *ps_fxaa, *ps_sharpen, *ps_over, *ps_xbr;
 static IDirect3DTexture9 *ov_tex;           /* high-res 3D layer (alpha = mask) */
 static UINT ov_w, ov_h;
 static IDirect3DVertexDeclaration9 *blit_decl;
@@ -92,6 +92,78 @@ static const char *VS_BLIT =
     "float4 hp : register(c0);\n"
     "struct V { float4 p : POSITION; float2 t : TEXCOORD0; };\n"
     "V main(float4 p : POSITION, float2 t : TEXCOORD0) { V o; o.p = float4(p.xy + hp.xy, 0, 1); o.t = t; return o; }\n";
+/* edge-directed pixel-art upscaler (own implementation of the xBR level-2
+   rules: corner/edge detection on luma in a 5x5 neighbourhood, 30/45/60
+   degree edges redrawn as smooth lines, blended over about one output
+   pixel) - for 2D screens, fonts and the game's sprites */
+static const char *PS_XBR =
+    "sampler2D s : register(s0);\n"
+    "float4 ts : register(c1);   // w, h, 1/w, 1/h of the source\n"
+    "float4 k : register(c2);    // x = output pixels per source pixel\n"
+    "static const float3 Y = float3(0.2126, 0.7152, 0.0722);\n"
+    "static const float4 Ao = float4(1.0, -1.0, -1.0, 1.0);\n"
+    "static const float4 Bo = float4(1.0, 1.0, -1.0, -1.0);\n"
+    "static const float4 Co = float4(1.5, 0.5, -0.5, 0.5);\n"
+    "static const float4 Ax = float4(1.0, -1.0, -1.0, 1.0);\n"
+    "static const float4 Bx = float4(0.5, 2.0, -0.5, -2.0);\n"
+    "static const float4 Cx = float4(1.0, 1.0, -0.5, 0.0);\n"
+    "static const float4 Ay = float4(1.0, -1.0, -1.0, 1.0);\n"
+    "static const float4 By = float4(2.0, 0.5, -2.0, -0.5);\n"
+    "static const float4 Cy = float4(2.0, 0.0, -1.0, 0.5);\n"
+    "float4 df(float4 a, float4 b) { return abs(a - b); }\n"
+    "float cdf(float3 a, float3 b) { float3 d = abs(a - b); return d.r + d.g + d.b; }\n"
+    "float4 neq(float4 a, float4 b) { return step(0.002, abs(a - b)); }\n"
+    "float4 eqv(float4 a, float4 b) { return 1.0 - step(0.06, abs(a - b)); }\n"
+    "float4 wdist(float4 a, float4 b, float4 c, float4 d, float4 e, float4 f, float4 g, float4 h)\n"
+    "{\n"
+    "    return df(a, b) + df(a, c) + df(d, e) + df(d, f) + 4.0 * df(g, h);\n"
+    "}\n"
+    "float3 T(float2 c, float x, float y) { return tex2D(s, c + float2(x, y) * ts.zw).rgb; }\n"
+    "float4 main(float2 uv : TEXCOORD0) : COLOR {\n"
+    "    float2 p = uv * ts.xy;\n"
+    "    float2 fp = frac(p);\n"
+    "    float2 c = (floor(p) + 0.5) * ts.zw;\n"
+    "    float3 A1 = T(c, -1, -2), B1 = T(c, 0, -2), C1 = T(c, 1, -2);\n"
+    "    float3 A0 = T(c, -2, -1), A = T(c, -1, -1), B = T(c, 0, -1), C = T(c, 1, -1), C4 = T(c, 2, -1);\n"
+    "    float3 D0 = T(c, -2, 0), D = T(c, -1, 0), E = T(c, 0, 0), F = T(c, 1, 0), F4 = T(c, 2, 0);\n"
+    "    float3 G0 = T(c, -2, 1), G = T(c, -1, 1), H = T(c, 0, 1), I = T(c, 1, 1), I4 = T(c, 2, 1);\n"
+    "    float3 G5 = T(c, -1, 2), H5 = T(c, 0, 2), I5 = T(c, 1, 2);\n"
+    "    float4 b = float4(dot(B, Y), dot(D, Y), dot(H, Y), dot(F, Y));\n"
+    "    float4 cc = float4(dot(C, Y), dot(A, Y), dot(G, Y), dot(I, Y));\n"
+    "    float ee = dot(E, Y);\n"
+    "    float4 e = float4(ee, ee, ee, ee);\n"
+    "    float4 d = b.yzwx, f = b.wxyz, g = cc.zwxy, h = b.zwxy, i = cc.wxyz;\n"
+    "    float4 i4 = float4(dot(I4, Y), dot(C1, Y), dot(A0, Y), dot(G5, Y));\n"
+    "    float4 i5 = float4(dot(I5, Y), dot(C4, Y), dot(A1, Y), dot(G0, Y));\n"
+    "    float4 h5 = float4(dot(H5, Y), dot(F4, Y), dot(B1, Y), dot(D0, Y));\n"
+    "    float4 f4 = h5.yzwx;\n"
+    "    float4 fx = Ao * fp.y + Bo * fp.x;\n"
+    "    float4 fxl = Ax * fp.y + Bx * fp.x;\n"
+    "    float4 fxu = Ay * fp.y + By * fp.x;\n"
+    "    float4 lv0 = neq(e, f) * neq(e, h);\n"
+    "    float4 lv1 = lv0 * saturate((1 - eqv(f, b)) * (1 - eqv(h, d)) + eqv(e, i) * (1 - eqv(f, i4)) * (1 - eqv(h, i5)) + eqv(e, g) + eqv(e, cc));\n"
+    "    float4 lv2l = neq(e, g) * neq(d, g);\n"
+    "    float4 lv2u = neq(e, cc) * neq(b, cc);\n"
+    "    float dl = clamp(1.0 / k.x, 0.08, 0.5);   // blend width: about one output pixel\n"
+    "    float4 delta = float4(dl, dl, dl, dl);\n"
+    "    float4 fx45 = saturate((fx + delta - Co) / (2 * delta));\n"
+    "    float4 fx30 = saturate((fxl + delta - Cx) / (2 * delta));\n"
+    "    float4 fx60 = saturate((fxu + delta - Cy) / (2 * delta));\n"
+    "    float4 wd1 = wdist(e, cc, g, i, h5, f4, h, f);\n"
+    "    float4 wd2 = wdist(h, d, i5, f, i4, b, e, i);\n"
+    "    float4 edr = step(wd1, wd2) * (1 - step(wd2, wd1)) * lv1;   // wd1 < wd2\n"
+    "    float4 edrl = step(2.0 * df(f, g), df(h, cc)) * lv2l * edr;\n"
+    "    float4 edru = step(2.0 * df(h, cc), df(f, g)) * lv2u * edr;\n"
+    "    fx45 *= edr; fx30 *= edrl; fx60 *= edru;\n"
+    "    float4 px = step(df(e, f), df(e, h));\n"
+    "    float4 mx = max(max(fx30, fx60), fx45);\n"
+    "    float3 r1 = lerp(E, lerp(H, F, px.x), mx.x);\n"
+    "    r1 = lerp(r1, lerp(B, D, px.z), mx.z);\n"
+    "    float3 r2 = lerp(E, lerp(F, B, px.y), mx.y);\n"
+    "    r2 = lerp(r2, lerp(D, H, px.w), mx.w);\n"
+    "    float3 r = lerp(r1, r2, step(cdf(E, r1), cdf(E, r2)));\n"
+    "    return float4(r, 1);\n"
+    "}\n";
 static const char *PS_OVER =
     "sampler2D s : register(s0);\n"
     "float4 main(float2 t : TEXCOORD0) : COLOR { return tex2D(s, t); }\n";
@@ -221,6 +293,7 @@ static int d3d_init(void)
     ps_fxaa = mk_ps(PS_FXAA);
     ps_sharpen = mk_ps(PS_SHARPEN);
     ps_over = mk_ps(PS_OVER);
+    ps_xbr = mk_ps(PS_XBR);
     D3DVERTEXELEMENT9 el[] = {{0, 0, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_POSITION, 0},
                               {0, 8, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0}, D3DDECL_END()};
     IDirect3DDevice9_CreateVertexDeclaration(dev, el, &blit_decl);
@@ -346,7 +419,11 @@ static void d3d_present(const u32 *pix, int w, int h, const u32 *ov, int ow, int
         /* upscale into the output-sized target */
         IDirect3DDevice9_SetRenderTarget(dev, 0, up_surf);
         D3DVIEWPORT9 vu = {0, 0, dw, dh, 0, 1};
-        if (opt_filter == 2 && ps_bicubic) blit(cur, w, h, ps_bicubic, vu, 1);
+        if (opt_filter == 4 && ps_xbr) {
+            float k[4] = {(float)dw / w, (float)dh / h, 0, 0};
+            IDirect3DDevice9_SetPixelShaderConstantF(dev, 2, k, 1);
+            blit(cur, w, h, ps_xbr, vu, 0);
+        } else if (opt_filter == 2 && ps_bicubic) blit(cur, w, h, ps_bicubic, vu, 1);
         else if (opt_filter == 3 && ps_sharpbil) {
             float k[4] = {(float)dw / w, (float)dh / h, 0, 0};
             IDirect3DDevice9_SetPixelShaderConstantF(dev, 2, k, 1);
@@ -486,7 +563,7 @@ static void update_checks(void)
     if (!g_menu) return;
     CheckMenuRadioItem(g_menu, ID_SCALE + 1, ID_SCALE + 6, ID_SCALE + opt_scale, MF_BYCOMMAND);
     CheckMenuRadioItem(g_menu, ID_ASPECT, ID_ASPECT + 2, ID_ASPECT + opt_aspect, MF_BYCOMMAND);
-    CheckMenuRadioItem(g_menu, ID_FILTER, ID_FILTER + 3, ID_FILTER + opt_filter, MF_BYCOMMAND);
+    CheckMenuRadioItem(g_menu, ID_FILTER, ID_FILTER + 4, ID_FILTER + opt_filter, MF_BYCOMMAND);
     CheckMenuRadioItem(g_menu, ID_SHARP, ID_SHARP + 3, ID_SHARP + opt_sharpen, MF_BYCOMMAND);
     CheckMenuItem(g_menu, ID_FXAA, MF_BYCOMMAND | (opt_fxaa ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_menu, ID_FULLSCREEN, MF_BYCOMMAND | (opt_fullscreen ? MF_CHECKED : MF_UNCHECKED));
@@ -512,6 +589,8 @@ static HMENU build_menu(void)
     AppendMenuW(asp, MF_STRING, ID_ASPECT + 0, L"Keep aspect 4:3  (black bars if the window doesn't match)");
     AppendMenuW(asp, MF_STRING, ID_ASPECT + 1, L"Stretch to window");
     AppendMenuW(asp, MF_STRING, ID_ASPECT + 2, L"Integer scaling  (pixel-exact)");
+    AppendMenuW(filt, MF_STRING, ID_FILTER + 4, L"xBR  (smooth edges, sharp - best for this game)");
+    AppendMenuW(filt, MF_SEPARATOR, 0, NULL);
     AppendMenuW(filt, MF_STRING, ID_FILTER + 0, L"Nearest  (sharp pixels)");
     AppendMenuW(filt, MF_STRING, ID_FILTER + 1, L"Bilinear  (smooth)");
     AppendMenuW(filt, MF_STRING, ID_FILTER + 2, L"Bicubic  (sharp + smooth)");
@@ -575,7 +654,7 @@ void video_menu_command(int id)
     extern void settings_save_video(void);
     if (id > ID_SCALE && id <= ID_SCALE + 6) opt_scale = id - ID_SCALE;
     else if (id >= ID_ASPECT && id <= ID_ASPECT + 2) opt_aspect = id - ID_ASPECT;
-    else if (id >= ID_FILTER && id <= ID_FILTER + 3) opt_filter = id - ID_FILTER;
+    else if (id >= ID_FILTER && id <= ID_FILTER + 4) opt_filter = id - ID_FILTER;
     else if (id >= ID_SHARP && id <= ID_SHARP + 3) opt_sharpen = id - ID_SHARP;
     else if (id == ID_FXAA) opt_fxaa = !opt_fxaa;
     else if (id == ID_INVERTY) opt_mouse_invert = !opt_mouse_invert;
