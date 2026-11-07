@@ -252,18 +252,27 @@ static void mem_init(void)
 }
 
 /* ---- the six programs ---- */
-#define MODULE(m) extern const FuncEnt m##_functab[]; extern const int m##_nfuncs;
+#define MODULE(m) extern const FuncEnt m##_functab[]; extern const int m##_nfuncs; extern const WrapEnt m##_wraptab[];
 MODULE(intro) MODULE(forest) MODULE(vil1) MODULE(vil2) MODULE(mine) MODULE(g3d)
-typedef struct { const char *name; const FuncEnt *tab; const int *n; } Module;
+typedef struct { const char *name; const FuncEnt *tab; const int *n; const WrapEnt *wrap; } Module;
 static const Module modules[] = {
-    {"INTRO", intro_functab, &intro_nfuncs},
-    {"FOREST", forest_functab, &forest_nfuncs},
-    {"VILLAGE1", vil1_functab, &vil1_nfuncs},
-    {"VILLAGE2", vil2_functab, &vil2_nfuncs},
-    {"MINE", mine_functab, &mine_nfuncs},
-    {"3DGAME", g3d_functab, &g3d_nfuncs},
+    {"INTRO", intro_functab, &intro_nfuncs, intro_wraptab},
+    {"FOREST", forest_functab, &forest_nfuncs, forest_wraptab},
+    {"VILLAGE1", vil1_functab, &vil1_nfuncs, vil1_wraptab},
+    {"VILLAGE2", vil2_functab, &vil2_nfuncs, vil2_wraptab},
+    {"MINE", mine_functab, &mine_nfuncs, mine_wraptab},
+    {"3DGAME", g3d_functab, &g3d_nfuncs, g3d_wraptab},
 };
 const char *rt_module = "";
+static const WrapEnt *cur_wrap;
+
+/* the original of a wrapped function in the running program */
+void (*rt_wrap_orig(const char *native, u32 *addr))(void)
+{
+    for (const WrapEnt *w = cur_wrap; w && w->orig; w++)
+        if (!strcmp(w->native, native)) { if (addr) *addr = w->addr; return w->orig; }
+    return NULL;
+}
 
 static jmp_buf exit_jb;
 static int exit_code;
@@ -315,8 +324,10 @@ static int run_program(const char *name, const char *args)
     dpmi_init();
     dos_reset();
     sound_reset();
+    { extern void hires3d_reset(void); hires3d_reset(); }
     rt_functab = m->tab;
     rt_nfuncs = *m->n;
+    cur_wrap = m->wrap;
     char exep[700];
     snprintf(exep, sizeof exep, "%s\\cd\\%s.EXE", rt_root, m->name);
     LoadInfo li;

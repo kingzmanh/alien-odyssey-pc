@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_syswm.h>
 #include "rt.h"
 
 volatile int rt_irq_pending;
@@ -128,22 +129,10 @@ void input_pump(void)
             exit(0);
         case SDL_KEYDOWN: case SDL_KEYUP: {
             if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_RETURN && (ev.key.keysym.mod & KMOD_ALT)) {
-                SDL_Window *w = SDL_GetWindowFromID(ev.key.windowID);
-                u32 fl = SDL_GetWindowFlags(w);
                 extern int opt_fullscreen;
-                extern void settings_save_fullscreen(void);
-                opt_fullscreen = !(fl & SDL_WINDOW_FULLSCREEN_DESKTOP);
-                SDL_SetWindowFullscreen(w, opt_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-                settings_save_fullscreen();
+                extern void video_set_fullscreen(int on);
+                video_set_fullscreen(!opt_fullscreen);
                 break;
-            }
-            {   /* F9..F12: display options (not passed to the game) */
-                extern int video_hotkey(int sdl_scancode);
-                SDL_Scancode k = ev.key.keysym.scancode;
-                if (k == SDL_SCANCODE_F9 || k == SDL_SCANCODE_F10 || k == SDL_SCANCODE_F11 || k == SDL_SCANCODE_F12) {
-                    if (ev.type == SDL_KEYDOWN && !ev.key.repeat) video_hotkey(k);
-                    break;
-                }
             }
             for (size_t i = 0; i < sizeof keymap / sizeof keymap[0]; i++)
                 if (keymap[i].s == ev.key.keysym.scancode) {
@@ -169,6 +158,12 @@ void input_pump(void)
             mouse_motion(ev.motion.xrel, ev.motion.yrel);
             break;
         }
+        case SDL_SYSWMEVENT:
+            if (ev.syswm.msg && ev.syswm.msg->msg.win.msg == WM_COMMAND && HIWORD(ev.syswm.msg->msg.win.wParam) == 0) {
+                extern void video_menu_command(int id);
+                video_menu_command(LOWORD(ev.syswm.msg->msg.win.wParam));
+            }
+            break;
         case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: {
             int b = ev.button.button == SDL_BUTTON_LEFT ? 1 : ev.button.button == SDL_BUTTON_RIGHT ? 2 : ev.button.button == SDL_BUTTON_MIDDLE ? 4 : 0;
             if (ev.type == SDL_MOUSEBUTTONDOWN) { mouse_buttons |= b; mouse_press_time(b); } else mouse_buttons &= ~b;
@@ -231,8 +226,11 @@ void irq_magic(u32 n)
 }
 
 static int in_irq;
+int rt_irq_hold;   /* set while the runtime runs guest code of its own (high-res 3D pass) */
+
 void irq_poll(void)
 {
+    if (rt_irq_hold) return;
     rt_irq_pending = 0;
     if (in_irq) return;
     in_irq = 1;

@@ -136,6 +136,9 @@ void rt_divide_error(u32 at);
 void rt_magic_chain(u32 ra);   /* retf into a pre-installed (BIOS) handler */
 
 typedef struct { u32 addr; void (*fn)(void); } FuncEnt;
+/* natives marked "wrap" in tools/native_<module>.txt: the original stays callable */
+typedef struct { u32 addr; void (*orig)(void); const char *native; } WrapEnt;
+void (*rt_wrap_orig(const char *native, u32 *addr))(void);
 /* function table of the program (module) currently loaded */
 extern const FuncEnt *rt_functab;
 extern int rt_nfuncs;

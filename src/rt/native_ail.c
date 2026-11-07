@@ -57,18 +57,25 @@ static u32 pool_addr(int kind, int idx)   /* kind 0 = sample, 1 = sequence */
     return handle_pool + 0x100 + kind * 0x800 + idx * 0x40;
 }
 
-/* ================= digital ================= */
+/* ================= digital =================
+ * Same sample model as Miles' own (its HSAMPLE fields in brackets): every
+ * sample has two buffers start[2]/len[2]/pos[2] with done[2] flags, the one
+ * playing is `cur` [+0x28], and `last` [+0x2c] remembers which buffer
+ * sample_buffer_ready last reported.  A one-shot sample is buffer 0 with
+ * buffer 1 marked done; a stream alternates between the two.  The 3D game
+ * runs its own 8-channel streaming engine on this, so the exact behaviour
+ * of AIL_sample_buffer_ready / AIL_load_sample_buffer matters. */
 typedef struct {
     int used, status;
-    u32 addr, len;          /* one-shot / looping data */
+    u32 start[2], len[2];
+    int done[2];
+    u64 pos[2];             /* 32.32 frames into each buffer */
+    int cur;
+    u32 last;
     int format;             /* 0 mono8, 1 mono16, 2 stereo8, 3 stereo16 */
     int sign8;              /* 8-bit data is signed */
     int rate, vol, pan, loops;   /* loops: 0 = forever, else count */
-    u64 pos, step;          /* 32.32 frames */
-    /* double-buffered streaming */
-    int stream;
-    u32 baddr[2], blen[2];
-    int bfull[2], bcur, bnext_fill, bend;
+    u64 step;
     u32 eos_cb, sob_cb, eob_cb;
     int eos_pending, eob_pending;
     s32 user[8];
@@ -95,7 +102,7 @@ static void update_step(Samp *s)
     s->step = (u64)((double)r / OUT_RATE * 4294967296.0);
 }
 
-static int read_frame(Samp *s, u32 addr, u32 f, s32 *l, s32 *r)
+static void read_frame(Samp *s, u32 addr, u32 f, s32 *l, s32 *r)
 {
     const u8 *p = MEM + addr;
     switch (s->format & 3) {
@@ -107,7 +114,6 @@ static int read_frame(Samp *s, u32 addr, u32 f, s32 *l, s32 *r)
         break;
     default: *l = ((const s16 *)p)[f * 2]; *r = ((const s16 *)p)[f * 2 + 1]; break;
     }
-    return 1;
 }
 
 static void mix(void *ud, Uint8 *stream, int len)
@@ -127,45 +133,34 @@ static void mix(void *ud, Uint8 *stream, int len)
         int pl = s->pan > 64 ? (127 - s->pan) * 2 : 127;
         int pr = s->pan < 64 ? s->pan * 2 : 127;
         for (int i = 0; i < frames; i++) {
-            u32 addr, nfr;
-            if (s->stream) {
-                if (!s->bfull[s->bcur]) {
-                    /* nothing queued: like AIL, the sample stops (it is done
-                       when the program stopped feeding it); the next
-                       load_sample_buffer starts it again */
-                    s->status = SMP_DONE;
-                    s->eos_pending = 1;
-                    break;
-                }
-                addr = s->baddr[s->bcur];
-                nfr = s->blen[s->bcur] / fb;
-            } else {
-                addr = s->addr;
-                nfr = s->len / fb;
-            }
-            u32 f = (u32)(s->pos >> 32);
-            if (f >= nfr) {
-                if (s->stream) {
-                    s->bfull[s->bcur] = 0;
-                    s->eob_pending = 1;
-                    s->bcur ^= 1;
-                    s->pos = 0;
+            int c = s->cur;
+            u32 nfr = s->len[c] / fb;
+            u32 f = (u32)(s->pos[c] >> 32);
+            if (f >= nfr || !s->start[c]) {
+                /* end of this buffer: loop a one-shot sample, or go on with
+                   the other buffer of a stream if it has been loaded */
+                if (s->done[c ^ 1] && nfr && s->loops != 1) {
+                    if (s->loops > 1) s->loops--;
+                    s->pos[c] = 0;
                     i--;
                     continue;
                 }
-                if (s->loops != 1) {
-                    if (s->loops > 1) s->loops--;
-                    s->pos -= (u64)nfr << 32;
-                    if ((u32)(s->pos >> 32) >= nfr) s->pos = 0;
-                    f = (u32)(s->pos >> 32);
-                    if (!nfr) { s->status = SMP_DONE; s->eos_pending = 1; break; }
-                } else { s->status = SMP_DONE; s->eos_pending = 1; break; }
+                s->done[c] = 1;
+                s->eob_pending = 1;
+                if (!s->done[c ^ 1] && s->len[c ^ 1]) {
+                    s->cur = c ^ 1;
+                    i--;
+                    continue;
+                }
+                s->status = SMP_DONE;
+                s->eos_pending = 1;
+                break;
             }
             s32 l, r;
-            read_frame(s, addr, f, &l, &r);
+            read_frame(s, s->start[c], f, &l, &r);
             acc[i * 2] += (s32)((s64)l * gain / (127 * 127) * pl / 127);
             acc[i * 2 + 1] += (s32)((s64)r * gain / (127 * 127) * pr / 127);
-            s->pos += s->step;
+            s->pos[c] += s->step;
         }
     }
     SDL_UnlockMutex(amx);
@@ -207,11 +202,14 @@ static Samp *S_arg(int n, int *idx)
     return i >= 0 ? &samp[i] : NULL;
 }
 
+/* AIL_init_sample: status done, buffer 0 empty and current, buffer 1 done */
 static void samp_init(Samp *s)
 {
     memset(s, 0, sizeof *s);
     s->used = 1;
     s->status = SMP_DONE;
+    s->done[1] = 1;
+    s->last = 0xfffffffeu;
     s->rate = 11025;
     s->vol = 127;
     s->pan = 64;
@@ -270,7 +268,7 @@ void N_AIL_init_sample(void)
     RET0();
 }
 
-/* parse a .WAV or .VOC file image in guest memory into s */
+/* parse a .WAV or .VOC file image in guest memory into buffer 0 of s */
 static int load_file(Samp *s, u32 img)
 {
     if (RD32(img) == 0x46464952 && RD32(img + 8) == 0x45564157) {   /* RIFF WAVE */
@@ -285,8 +283,8 @@ static int load_file(Samp *s, u32 img)
                 s->sign8 = 0;
                 fmt_ok = 1;
             } else if (id == 0x61746164 && fmt_ok) {   /* "data" */
-                s->addr = p + 8;
-                s->len = n;
+                s->start[0] = p + 8;
+                s->len[0] = n;
                 update_step(s);
                 return 1;
             }
@@ -303,8 +301,8 @@ static int load_file(Samp *s, u32 img)
                 s->rate = 1000000 / (256 - RD8(p + 4));
                 s->format = 0;
                 s->sign8 = 0;
-                s->addr = p + 6;
-                s->len = n - 2;
+                s->start[0] = p + 6;
+                s->len[0] = n - 2;
                 update_step(s);
                 return 1;
             }
@@ -319,7 +317,12 @@ void N_AIL_set_sample_file(void)
 {
     Samp *s = S_arg(0, NULL);
     int ok = 0;
-    if (s) { SDL_LockMutex(amx); s->stream = 0; ok = load_file(s, ARG(1)); SDL_UnlockMutex(amx); }
+    if (s) {
+        SDL_LockMutex(amx);
+        ok = load_file(s, ARG(1));
+        s->cur = 0; s->done[0] = 0; s->done[1] = 1; s->pos[0] = 0;
+        SDL_UnlockMutex(amx);
+    }
     RET_V(ok);
 }
 
@@ -340,10 +343,17 @@ void N_AIL_allocate_file_sample(void)
     RET_V(0);
 }
 
+/* AIL_set_sample_address(S, start, len): buffer 0 */
 void N_AIL_set_sample_address(void)
 {
     Samp *s = S_arg(0, NULL);
-    if (s) { SDL_LockMutex(amx); s->stream = 0; s->addr = ARG(1); s->len = ARG(2); s->pos = 0; SDL_UnlockMutex(amx); }
+    if (s) {
+        SDL_LockMutex(amx);
+        s->start[0] = ARG(1); s->len[0] = ARG(2); s->pos[0] = 0;
+        s->start[1] = 0; s->len[1] = 0;
+        s->cur = 0; s->done[0] = 0; s->done[1] = 1;
+        SDL_UnlockMutex(amx);
+    }
     RET0();
 }
 
@@ -355,12 +365,13 @@ void N_AIL_set_sample_type(void)
     RET0();
 }
 
+/* AIL_start_sample: plays the current buffer from its start */
 void N_AIL_start_sample(void)
 {
     Samp *s = S_arg(0, NULL);
-    if (s) {
+    if (s && s->status != SMP_FREE && s->len[s->cur] && s->start[s->cur]) {
         SDL_LockMutex(amx);
-        s->pos = 0;
+        s->pos[s->cur] = 0;
         s->eos_pending = 0;
         s->status = SMP_PLAYING;
         SDL_UnlockMutex(amx);
@@ -385,13 +396,7 @@ void N_AIL_resume_sample(void)
 void N_AIL_end_sample(void)
 {
     Samp *s = S_arg(0, NULL);
-    if (s) {
-        SDL_LockMutex(amx);
-        if (s->status == SMP_PLAYING || s->status == SMP_STOPPED) s->status = SMP_DONE;
-        s->bfull[0] = s->bfull[1] = 0;
-        s->bend = 0;
-        SDL_UnlockMutex(amx);
-    }
+    if (s && s->status != SMP_FREE) s->status = SMP_DONE;
     RET0();
 }
 
@@ -416,56 +421,51 @@ void N_AIL_digital_master_volume(void) { RET_V(dig_master); }
 void N_AIL_set_sample_position(void)
 {
     Samp *s = S_arg(0, NULL);
-    if (s) s->pos = (u64)(ARG(1) / frame_bytes(s->format)) << 32;
+    if (s) s->pos[s->cur] = (u64)(ARG(1) / frame_bytes(s->format)) << 32;
     RET0();
 }
 
 void N_AIL_sample_position(void)
 {
     Samp *s = S_arg(0, NULL);
-    RET_V(s ? (u32)(s->pos >> 32) * frame_bytes(s->format) : 0);
+    RET_V(s ? (u32)(s->pos[s->cur] >> 32) * frame_bytes(s->format) : 0);
 }
 
 /* AIL_minimum_sample_buffer_size(dig, rate, format) */
 void N_AIL_minimum_sample_buffer_size(void) { RET_V(0x1000); }
 
-/* AIL_sample_buffer_ready(S) -> buffer (0/1) the program may fill, or -1 */
+/* AIL_sample_buffer_ready(S): exactly Miles' rule - buffer 0, then 1, then
+   the buffer that just finished each time playback moved to the other one;
+   -1 if it has not moved since the last call */
 void N_AIL_sample_buffer_ready(void)
 {
     Samp *s = S_arg(0, NULL);
     int r = -1;
     if (s) {
         SDL_LockMutex(amx);
-        if (!s->stream) { s->stream = 1; s->bfull[0] = s->bfull[1] = 0; s->bnext_fill = 0; s->bcur = 0; }
-        if (!s->bfull[s->bnext_fill]) r = s->bnext_fill;
-        if (getenv("AO_SNDLOG")) rt_log("snd %u: ready -> %d (full %d%d cur %d st %d pos %u)\n", SDL_GetTicks(), r, s->bfull[0], s->bfull[1], s->bcur, s->status, (u32)(s->pos >> 32));
+        if (s->last < 0xfffffffeu) {
+            if (s->last != (u32)s->cur) { s->last = s->cur; r = s->cur ^ 1; }
+        } else if (s->last == 0xffffffffu) { s->last = s->cur; r = 1; }
+        else { s->last = 0xffffffffu; r = 0; }
+        if (getenv("AO_SNDLOG")) rt_log("snd %u: ready -> %d (cur %d done %d%d st %d)\n", SDL_GetTicks(), r, s->cur, s->done[0], s->done[1], s->status);
         SDL_UnlockMutex(amx);
     }
     RET_V(r);
 }
 
-/* AIL_load_sample_buffer(S, buff_num, buffer, len): len 0 = end of stream */
+/* AIL_load_sample_buffer(S, buff_num, buffer, len): len 0 = nothing more */
 void N_AIL_load_sample_buffer(void)
 {
     Samp *s = S_arg(0, NULL);
     u32 n = ARG(1) & 1, buf = ARG(2), len = ARG(3);
     if (s) {
         SDL_LockMutex(amx);
-        if (!s->stream) { s->stream = 1; s->bfull[0] = s->bfull[1] = 0; s->bcur = n; }
-        if (!len) s->bend = 1;
-        else {
-            s->baddr[n] = buf;
-            s->blen[n] = len;
-            s->bfull[n] = 1;
-            s->bend = 0;
-        }
-        s->bnext_fill = n ^ 1;
+        s->pos[n] = 0;
+        s->done[n] = len == 0;
+        s->len[n] = len;
+        s->start[n] = buf;
+        if (len && s->status != SMP_PLAYING) s->status = SMP_PLAYING;
         if (getenv("AO_SNDLOG")) rt_log("snd %u: load %u buf %08x len %u\n", SDL_GetTicks(), n, buf, len);
-        if (s->status != SMP_PLAYING && len) {
-            s->bcur = n;
-            s->pos = 0;
-            s->status = SMP_PLAYING;
-        }
         SDL_UnlockMutex(amx);
     }
     RET0();

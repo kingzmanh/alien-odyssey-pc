@@ -1043,12 +1043,15 @@ def main():
         return a
     extra = [rel(int(l.split('\t')[0], 16)) for l in open(gfuncs) if l.strip()]
     native = {}
+    wrap = set()   # "addr name wrap": calls go to the native, which can still run the original
     if os.path.exists(native_txt):
         for line in open(native_txt):
             line = line.split('#')[0].strip()
             if line:
-                a, n = line.split()[:2]
-                native[int(a, 16)] = n
+                w = line.split()
+                native[int(w[0], 16)] = w[1]
+                if len(w) > 2 and w[2] == 'wrap':
+                    wrap.add(int(w[0], 16))
     # 'int N; ret' stub tables (Watcom int386): every stub is a jump target
     mem = p.le.mem
     lo = p.le.lo
@@ -1062,7 +1065,8 @@ def main():
         a += 1
     funcs, noreturn, rejected = analyze(p, extra, returning=set(native))
     for a in native:
-        funcs.pop(a, None)
+        if a not in wrap:
+            funcs.pop(a, None)
     g = Gen(p, funcs, native, noreturn)
     g.interproc()
     os.makedirs(outdir, exist_ok=True)
@@ -1110,6 +1114,12 @@ def main():
         tab.append('    {0x%xu, %s},' % (e, native.get(e, PFX + '%x' % e)))
     tab.append('};')
     tab.append('const int %s_nfuncs = %d;' % (mod, len(allf)))
+    tab.append('const WrapEnt %s_wraptab[] = {' % mod)
+    for a in sorted(wrap):
+        if a in funcs:
+            tab.append('    {0x%xu, %s%x, "%s"},' % (a, PFX, a, native[a]))
+    tab.append('    {0, 0, 0}')
+    tab.append('};')
     open(os.path.join(outdir, 'functab.c'), 'w').write('\n'.join(tab) + '\n')
     print('functions', len(funcs), 'native', len(native), 'files', len(files))
     print('unimplemented:', dict(g.unimpl.most_common()))

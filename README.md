@@ -20,10 +20,15 @@ Scripted install: `"Alien Odyssey PC Setup.exe" /silent /cd <iso|cue|drive|folde
 ## Playing
 
 - Starts in fullscreen; **Alt+Enter** switches to a window and back (remembered in `odyssey_pc.ini`).
-- Picture (Direct3D 9, same post chain as our Xbox ports): the game draws at 320x200 and is brought up
-  to your screen with a choice of filter - **F9** nearest / bilinear / bicubic / sharp bilinear -,
-  **F10** contrast-adaptive sharpening (off/low/medium/high), **F11** FXAA, **F12** aspect
-  (4:3 / stretch / whole pixels). Defaults: bicubic + medium sharpening, 4:3. Saved in `odyssey_pc.ini`.
+- **Video menu** (menu bar of the window, like our Xbox ports; hidden in fullscreen):
+  - *Internal Resolution* 1x-6x (320x200 up to 1920x1200): the 3D game's scenes are really rendered at
+    this size (BRender is asked to render the scene a second time into a larger frame, seeded with the
+    pre-rendered room and its depth map, and the result is laid over the picture with a mask, so the
+    HUD and 2D parts stay as drawn). Default 4x.
+  - *Upscale Filter* (nearest / bilinear / bicubic / sharp bilinear), *Anti-aliasing (FXAA)*,
+    *Sharpening* (contrast adaptive, off/low/medium/high), *Aspect Ratio* (4:3 / stretch / integer).
+  - *View*: window size, fullscreen (Alt+Enter), FPS in the title. All saved in `odyssey_pc.ini`.
+  - The videos and 2D screens only carry their original 320x200 pixels; they go through the filter.
 - Keyboard as in the original (`GAME.CFG` holds the key layout, as on DOS).
 - Speech, sound effects and the FMV soundtracks through a software mixer; music through the
   Windows General MIDI synthesizer (the game's General MIDI arrangements).
@@ -45,7 +50,8 @@ the (rewritten) launcher what to run next, exactly as `MCP.EXE` did.
 | The launcher (`MCP.EXE` rewritten): program sequence, passwords, save slots | `src/rt/main.c` |
 | DOS (`int 21h`) on Windows files, DPMI (`int 31h`), VGA BIOS, keyboard, MSCDEX (incl. sector reads for the FMV streams) | `src/rt/dos.c`, `dpmi.c`, `bios.c`, `cdrom.c` |
 | Timer and keyboard interrupts driven from the Windows clock and window events | `src/rt/irq.c` |
-| Window, palette, frame buffer (SDL2) | `src/rt/video.c` |
+| Window, menu, palette, Direct3D 9 presenter (filters, FXAA, CAS sharpening) | `src/rt/video.c` |
+| Higher internal resolution of the 3D game (BRender scene rendered again at N x size) | `src/rt/hires3d.c` |
 | Miles Sound System (AIL 3) replaced at its API: sample mixer, streaming, XMIDI player on Windows MIDI | `src/rt/native_ail.c`, mapping per program by `tools/gen_ail_natives.py` |
 | Native code for routines that modify themselves or jump into their own unrolled loops (BRP video frame decoders, the mine's texture floor) | `src/rt/native.c`, `tools/native_<module>.txt` |
 | Installer: ISO 9660 / BIN+CUE reader, setup UI, uninstaller | `installer/` |

@@ -5,6 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <string.h>
+#include <stdlib.h>
 #include "rt.h"
 
 #define NSEL 8192
@@ -236,6 +237,7 @@ void rt_int31(void)
     case 0x0501: { /* allocate memory block */
         u32 sz = ((u32)BX << 16) | CX;
         u32 a = heap_alloc(sz);
+        if (getenv("AO_MEMLOG")) rt_log("dpmi: alloc %u -> %08x\n", sz, a);
         if (!a) { cpu.cf = 1; SETAX(0x8013); break; }
         u32 h = nblocks < 256 ? nblocks++ : 255;
         blocks[h].addr = a; blocks[h].size = sz;

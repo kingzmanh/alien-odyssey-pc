@@ -7,8 +7,10 @@
  * FXAA at the game's resolution, upscale to the output size with the chosen
  * filter (nearest, bilinear, Catmull-Rom bicubic, or sharp bilinear), then
  * optional contrast-adaptive sharpening at output resolution - the same
- * post chain as the Xbox ports.  Options in odyssey_pc.ini [video], hotkeys
- * F9 filter, F10 sharpening, F11 FXAA, F12 aspect (shown on screen).
+ * post chain as the Xbox ports.  In the 3D game the scenes themselves are
+ * rendered at the chosen internal resolution (hires3d.c).  Options live in
+ * a Video / View / Help menu bar on the window, like our Xbox ports, and in
+ * odyssey_pc.ini [video].
  *
  * VESA banked modes keep the full picture in a 4 MB frame buffer at guest
  * address VRAM_GUEST; the 64 KB window at A0000h holds the selected bank. */
@@ -35,7 +37,13 @@ static int pal_dirty = 1;
 static u64 last_present;
 static u32 *rgb;                    /* converted frame */
 
-extern int opt_fullscreen, opt_filter, opt_sharpen, opt_fxaa, opt_aspect, opt_vsync;
+extern int opt_fullscreen, opt_filter, opt_sharpen, opt_fxaa, opt_aspect, opt_vsync, opt_scale, opt_showfps;
+extern int hires3d_frame(const u8 **pix, const u8 **mask, int *w, int *h);
+static u32 *rgb_hi;
+static int rgb_hi_n;
+static HMENU g_menu;
+static HMENU build_menu(void);
+static void update_checks(void);
 extern void settings_save_video(void);
 
 /* ---------------- Direct3D 9 ---------------- */
@@ -49,7 +57,9 @@ static IDirect3DTexture9 *up_tex;           /* upscaled picture at output size *
 static IDirect3DSurface9 *up_surf;
 static UINT src_w, src_h, up_w, up_h;
 static IDirect3DVertexShader9 *vs_blit;
-static IDirect3DPixelShader9 *ps_copy, *ps_bicubic, *ps_sharpbil, *ps_fxaa, *ps_sharpen;
+static IDirect3DPixelShader9 *ps_copy, *ps_bicubic, *ps_sharpbil, *ps_fxaa, *ps_sharpen, *ps_over;
+static IDirect3DTexture9 *ov_tex;           /* high-res 3D layer (alpha = mask) */
+static UINT ov_w, ov_h;
 static IDirect3DVertexDeclaration9 *blit_decl;
 static int d3d_ok;
 
@@ -82,6 +92,9 @@ static const char *VS_BLIT =
     "float4 hp : register(c0);\n"
     "struct V { float4 p : POSITION; float2 t : TEXCOORD0; };\n"
     "V main(float4 p : POSITION, float2 t : TEXCOORD0) { V o; o.p = float4(p.xy + hp.xy, 0, 1); o.t = t; return o; }\n";
+static const char *PS_OVER =
+    "sampler2D s : register(s0);\n"
+    "float4 main(float2 t : TEXCOORD0) : COLOR { return tex2D(s, t); }\n";
 static const char *PS_COPY =
     "sampler2D s : register(s0);\n"
     "float4 main(float2 t : TEXCOORD0) : COLOR { return float4(tex2D(s, t).rgb, 1); }\n";
@@ -163,7 +176,8 @@ static void release_targets(void)
     if (aa_tex) { IDirect3DTexture9_Release(aa_tex); aa_tex = NULL; }
     if (up_surf) { IDirect3DSurface9_Release(up_surf); up_surf = NULL; }
     if (up_tex) { IDirect3DTexture9_Release(up_tex); up_tex = NULL; }
-    src_w = src_h = up_w = up_h = 0;
+    if (ov_tex) { IDirect3DTexture9_Release(ov_tex); ov_tex = NULL; }
+    src_w = src_h = up_w = up_h = ov_w = ov_h = 0;
 }
 
 static void desktop_size(UINT *w, UINT *h)
@@ -186,7 +200,10 @@ static int d3d_init(void)
     pp.BackBufferFormat = D3DFMT_X8R8G8B8;
     desktop_size(&pp.BackBufferWidth, &pp.BackBufferHeight);
     pp.hDeviceWindow = hwnd;
-    pp.PresentationInterval = opt_vsync ? D3DPRESENT_INTERVAL_ONE : D3DPRESENT_INTERVAL_IMMEDIATE;
+    /* never wait for the vertical blank: presenting runs on the game's own
+       thread (a blocking Present slowed the whole game down); windowed and
+       borderless output is composited by Windows, so there is no tearing */
+    pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
     if (FAILED(IDirect3D9_CreateDevice(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd,
                                        D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_FPU_PRESERVE, &pp, &dev)) &&
         FAILED(IDirect3D9_CreateDevice(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd,
@@ -203,6 +220,7 @@ static int d3d_init(void)
     ps_sharpbil = mk_ps(PS_SHARPBIL);
     ps_fxaa = mk_ps(PS_FXAA);
     ps_sharpen = mk_ps(PS_SHARPEN);
+    ps_over = mk_ps(PS_OVER);
     D3DVERTEXELEMENT9 el[] = {{0, 0, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_POSITION, 0},
                               {0, 8, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0}, D3DDECL_END()};
     IDirect3DDevice9_CreateVertexDeclaration(dev, el, &blit_decl);
@@ -271,30 +289,7 @@ static void dest_rect(UINT cw, UINT ch, UINT *dx, UINT *dy, UINT *dw, UINT *dh)
     if (!*dh) *dh = 1;
 }
 
-/* on-screen note after an option hotkey (drawn with GDI on the back buffer) */
-static char osd[96];
-static u64 osd_until;
-static void osd_show(const char *s) { snprintf(osd, sizeof osd, "%s", s); osd_until = SDL_GetTicks64() + 2500; rt_log("video: %s\n", s); }
-
-static void draw_osd(IDirect3DSurface9 *bb, UINT ch)
-{
-    if (!osd_until || SDL_GetTicks64() > osd_until) { osd_until = 0; return; }
-    HDC dc;
-    if (FAILED(IDirect3DSurface9_GetDC(bb, &dc))) return;
-    int px = (int)ch / 24 < 18 ? 18 : (int)ch / 24;
-    HFONT f = CreateFontA(-px, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Segoe UI");
-    HGDIOBJ of = SelectObject(dc, f);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(0, 0, 0));
-    TextOutA(dc, px + 2, px + 2, osd, (int)strlen(osd));
-    SetTextColor(dc, RGB(255, 230, 120));
-    TextOutA(dc, px, px, osd, (int)strlen(osd));
-    SelectObject(dc, of);
-    DeleteObject(f);
-    IDirect3DSurface9_ReleaseDC(bb, dc);
-}
-
-static void d3d_present(const u32 *pix, int w, int h)
+static void d3d_present(const u32 *pix, int w, int h, const u32 *ov, int ow, int oh)
 {
     HRESULT hr = IDirect3DDevice9_TestCooperativeLevel(dev);
     if (hr == D3DERR_DEVICELOST) return;
@@ -320,6 +315,14 @@ static void d3d_present(const u32 *pix, int w, int h)
     if (SUCCEEDED(IDirect3DTexture9_LockRect(src_tex, 0, &lr, NULL, D3DLOCK_DISCARD))) {
         for (int y = 0; y < h; y++) memcpy((u8 *)lr.pBits + y * lr.Pitch, pix + y * w, w * 4);
         IDirect3DTexture9_UnlockRect(src_tex, 0);
+    }
+    if (ov && ((UINT)ow != ov_w || (UINT)oh != ov_h)) {
+        if (ov_tex) { IDirect3DTexture9_Release(ov_tex); ov_tex = NULL; }
+        if (SUCCEEDED(IDirect3DDevice9_CreateTexture(dev, ow, oh, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &ov_tex, NULL))) { ov_w = ow; ov_h = oh; }
+    }
+    if (ov && ov_tex && SUCCEEDED(IDirect3DTexture9_LockRect(ov_tex, 0, &lr, NULL, D3DLOCK_DISCARD))) {
+        for (int y = 0; y < oh; y++) memcpy((u8 *)lr.pBits + y * lr.Pitch, ov + (size_t)y * ow, ow * 4);
+        IDirect3DTexture9_UnlockRect(ov_tex, 0);
     }
     IDirect3DSurface9 *bb = NULL;
     if (FAILED(IDirect3DDevice9_GetBackBuffer(dev, 0, 0, D3DBACKBUFFER_TYPE_MONO, &bb))) return;
@@ -349,6 +352,13 @@ static void d3d_present(const u32 *pix, int w, int h)
             IDirect3DDevice9_SetPixelShaderConstantF(dev, 2, k, 1);
             blit(cur, w, h, ps_sharpbil, vu, 1);
         } else blit(cur, w, h, ps_copy, vu, opt_filter != 0);
+        if (ov && ov_tex && ps_over) {   /* the high-res 3D layer on top, edges antialiased by its mask */
+            IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHABLENDENABLE, TRUE);
+            IDirect3DDevice9_SetRenderState(dev, D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+            IDirect3DDevice9_SetRenderState(dev, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+            blit(ov_tex, ow, oh, ps_over, vu, 1);
+            IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHABLENDENABLE, FALSE);
+        }
         /* sharpen at output resolution, straight into the back buffer */
         IDirect3DDevice9_SetRenderTarget(dev, 0, bb);
         D3DRECT all = {0, 0, (LONG)cw, (LONG)ch};
@@ -369,7 +379,6 @@ static void d3d_present(const u32 *pix, int w, int h)
         IDirect3DSurface9_Release(s);
     }
     IDirect3DDevice9_EndScene(dev);
-    draw_osd(bb, ch);
     IDirect3DSurface9_Release(bb);
     RECT sr = {0, 0, (LONG)cw, (LONG)ch};
     IDirect3DDevice9_Present(dev, &sr, NULL, NULL, NULL);
@@ -390,6 +399,14 @@ void video_init(void)
     if (SDL_GetWindowWMInfo(win, &wi)) hwnd = wi.info.win.window;
     d3d_ok = hwnd && d3d_init();
     if (!d3d_ok) rt_fatal("Direct3D 9 is not available on this PC.");
+    g_menu = build_menu();
+    update_checks();
+    if (getenv("AO_NOMENU")) { rt_log("video: menu disabled\n"); return; }
+    if (!opt_fullscreen) {
+        SetMenu(hwnd, g_menu);
+        SDL_SetWindowSize(win, 1280, 960);
+    }
+    SDL_EventState(SDL_SYSWMEVENT, SDL_ENABLE);   /* menu commands arrive as WM_COMMAND */
     for (int i = 0; i < 256; i++) video_set_pal(i, i >> 2, i >> 2, i >> 2);
     SDL_ShowCursor(SDL_DISABLE);   /* the game draws its own pointer */
 }
@@ -423,24 +440,125 @@ void video_set_pal(int idx, int r, int g, int b)
     pal_dirty = 1;
 }
 
-/* option hotkeys (F9..F12), handled by the PC side, not passed to the game */
-int video_hotkey(int sdl_scancode)
+/* ---------------- menu bar (like the Xbox ports) ---------------- */
+enum {
+    ID_SCALE = 1000,                        /* +1..+6 */
+    ID_ASPECT = 1100,                       /* +0..2 */
+    ID_FILTER = 1200,                       /* +0..3 */
+    ID_FXAA = 1300, ID_SHARP = 1310,        /* +0..3 */
+    ID_WIN = 1500,                          /* +1..3 */
+    ID_FULLSCREEN = 1510, ID_SHOWFPS, ID_VSYNC,
+    ID_CONTROLS = 1700, ID_ABOUT,
+};
+
+static void update_checks(void)
 {
-    static const char *fn[] = {"nearest", "bilinear", "bicubic", "sharp bilinear"};
-    static const char *sn[] = {"off", "low", "medium", "high"};
-    static const char *an[] = {"4:3", "stretch", "whole pixels"};
-    char t[96];
-    switch (sdl_scancode) {
-    case SDL_SCANCODE_F9: opt_filter = (opt_filter + 1) % 4; snprintf(t, sizeof t, "Upscale filter: %s", fn[opt_filter]); break;
-    case SDL_SCANCODE_F10: opt_sharpen = (opt_sharpen + 1) % 4; snprintf(t, sizeof t, "Sharpening: %s", sn[opt_sharpen]); break;
-    case SDL_SCANCODE_F11: opt_fxaa = !opt_fxaa; snprintf(t, sizeof t, "FXAA: %s", opt_fxaa ? "on" : "off"); break;
-    case SDL_SCANCODE_F12: opt_aspect = (opt_aspect + 1) % 3; snprintf(t, sizeof t, "Aspect: %s", an[opt_aspect]); break;
-    default: return 0;
+    if (!g_menu) return;
+    CheckMenuRadioItem(g_menu, ID_SCALE + 1, ID_SCALE + 6, ID_SCALE + opt_scale, MF_BYCOMMAND);
+    CheckMenuRadioItem(g_menu, ID_ASPECT, ID_ASPECT + 2, ID_ASPECT + opt_aspect, MF_BYCOMMAND);
+    CheckMenuRadioItem(g_menu, ID_FILTER, ID_FILTER + 3, ID_FILTER + opt_filter, MF_BYCOMMAND);
+    CheckMenuRadioItem(g_menu, ID_SHARP, ID_SHARP + 3, ID_SHARP + opt_sharpen, MF_BYCOMMAND);
+    CheckMenuItem(g_menu, ID_FXAA, MF_BYCOMMAND | (opt_fxaa ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_menu, ID_FULLSCREEN, MF_BYCOMMAND | (opt_fullscreen ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_menu, ID_SHOWFPS, MF_BYCOMMAND | (opt_showfps ? MF_CHECKED : MF_UNCHECKED));
+}
+
+static HMENU build_menu(void)
+{
+    HMENU bar = CreateMenu(), video = CreatePopupMenu(), res = CreatePopupMenu(), asp = CreatePopupMenu(),
+          filt = CreatePopupMenu(), sharp = CreatePopupMenu(), view = CreatePopupMenu(), winm = CreatePopupMenu(),
+          help = CreatePopupMenu();
+    static const wchar_t *cls[7] = {L"", L"  Native", L"  480p-class", L"  720p-class", L"  1080p-class", L"  1440p-class", L"  4K-class"};
+    for (int s = 1; s <= 6; s++) {
+        wchar_t t[96];
+        swprintf(t, 96, L"%dx  (%dx%d)%ls", s, 320 * s, 200 * s, cls[s]);
+        AppendMenuW(res, MF_STRING, ID_SCALE + s, t);
     }
-    osd_show(t);
+    AppendMenuW(res, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(res, MF_STRING | MF_GRAYED, 0, L"3D scenes are rendered at this size; videos use the upscale filter");
+    AppendMenuW(asp, MF_STRING, ID_ASPECT + 0, L"Keep aspect 4:3  (black bars if the window doesn't match)");
+    AppendMenuW(asp, MF_STRING, ID_ASPECT + 1, L"Stretch to window");
+    AppendMenuW(asp, MF_STRING, ID_ASPECT + 2, L"Integer scaling  (pixel-exact)");
+    AppendMenuW(filt, MF_STRING, ID_FILTER + 0, L"Nearest  (sharp pixels)");
+    AppendMenuW(filt, MF_STRING, ID_FILTER + 1, L"Bilinear  (smooth)");
+    AppendMenuW(filt, MF_STRING, ID_FILTER + 2, L"Bicubic  (sharp + smooth)");
+    AppendMenuW(filt, MF_STRING, ID_FILTER + 3, L"Sharp bilinear  (crisp pixels, even sizes)");
+    AppendMenuW(sharp, MF_STRING, ID_SHARP + 0, L"Off");
+    AppendMenuW(sharp, MF_STRING, ID_SHARP + 1, L"Low");
+    AppendMenuW(sharp, MF_STRING, ID_SHARP + 2, L"Medium");
+    AppendMenuW(sharp, MF_STRING, ID_SHARP + 3, L"High");
+    AppendMenuW(video, MF_POPUP, (UINT_PTR)res, L"&Internal Resolution");
+    AppendMenuW(video, MF_POPUP, (UINT_PTR)asp, L"&Aspect Ratio");
+    AppendMenuW(video, MF_POPUP, (UINT_PTR)filt, L"Upscale &Filter");
+    AppendMenuW(video, MF_STRING, ID_FXAA, L"Anti-aliasing (&FXAA)");
+    AppendMenuW(video, MF_POPUP, (UINT_PTR)sharp, L"&Sharpening (contrast adaptive)");
+    for (int k = 1; k <= 3; k++) { wchar_t t[32]; swprintf(t, 32, L"%d x %d", 640 * k, 480 * k); AppendMenuW(winm, MF_STRING, ID_WIN + k, t); }
+    AppendMenuW(view, MF_POPUP, (UINT_PTR)winm, L"&Window Size");
+    AppendMenuW(view, MF_STRING, ID_FULLSCREEN, L"&Fullscreen\tAlt+Enter");
+    AppendMenuW(view, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(view, MF_STRING, ID_SHOWFPS, L"Show FPS in title");
+    AppendMenuW(help, MF_STRING, ID_CONTROLS, L"&Controls...");
+    AppendMenuW(help, MF_STRING, ID_ABOUT, L"&About...");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)video, L"&Video");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)view, L"Vie&w");
+    AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"&Help");
+    return bar;
+}
+
+/* fullscreen hides the menu bar, a window shows it */
+void video_set_fullscreen(int on)
+{
+    extern void settings_save_fullscreen(void);
+    opt_fullscreen = on;
+    if (!getenv("AO_HIDDEN")) {
+        if (on) { SetMenu(hwnd, NULL); SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP); }
+        else { SDL_SetWindowFullscreen(win, 0); SetMenu(hwnd, g_menu); }
+    }
+    settings_save_fullscreen();
+    update_checks();
+}
+
+static void set_client_size(int w, int h)
+{
+    if (opt_fullscreen) video_set_fullscreen(0);
+    SDL_RestoreWindow(win);
+    RECT r = {0, 0, w, h};
+    AdjustWindowRect(&r, (DWORD)GetWindowLongPtrA(hwnd, GWL_STYLE), g_menu != NULL);
+    SetWindowPos(hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
+}
+
+void video_menu_command(int id)
+{
+    extern void settings_save_video(void);
+    if (id > ID_SCALE && id <= ID_SCALE + 6) opt_scale = id - ID_SCALE;
+    else if (id >= ID_ASPECT && id <= ID_ASPECT + 2) opt_aspect = id - ID_ASPECT;
+    else if (id >= ID_FILTER && id <= ID_FILTER + 3) opt_filter = id - ID_FILTER;
+    else if (id >= ID_SHARP && id <= ID_SHARP + 3) opt_sharpen = id - ID_SHARP;
+    else if (id == ID_FXAA) opt_fxaa = !opt_fxaa;
+    else if (id > ID_WIN && id <= ID_WIN + 3) { set_client_size(640 * (id - ID_WIN), 480 * (id - ID_WIN)); return; }
+    else if (id == ID_FULLSCREEN) { video_set_fullscreen(!opt_fullscreen); return; }
+    else if (id == ID_SHOWFPS) { opt_showfps = !opt_showfps; if (!opt_showfps) SDL_SetWindowTitle(win, "Alien Odyssey"); }
+    else if (id == ID_CONTROLS) {
+        MessageBoxA(hwnd,
+                    "The game's own controls, as on DOS (GAME.CFG holds the key layout):\n\n"
+                    "Arrow keys - move / steer / aim\n"
+                    "Ctrl, Space, Z, X, Shift, Alt - actions (see the manual)\n"
+                    "Esc - menu / skip\n\n"
+                    "PC: Alt+Enter switches fullscreen; in a window the menu bar has the video options.",
+                    "Alien Odyssey - Controls", MB_ICONINFORMATION);
+        return;
+    } else if (id == ID_ABOUT) {
+        MessageBoxA(hwnd,
+                    "Alien Odyssey - PC Native\n\n"
+                    "The DOS game's code converted to native Windows code, running on a PC\n"
+                    "runtime that replaces DOS, the extender, and the sound and video hardware.\n\n"
+                    "Alien Odyssey (c) Argonaut Software / Philips Media. Fan preservation project.",
+                    "About", MB_ICONINFORMATION);
+        return;
+    } else return;
     settings_save_video();
+    update_checks();
     video_present(1);
-    return 1;
 }
 
 /* window coordinates -> game screen coordinates */
@@ -469,7 +587,7 @@ void video_present(int force)
     if (!video_w || !rgb) {
         if (d3d_ok && !force) {
             u32 black = 0xff000000u;
-            d3d_present(&black, 1, 1);
+            d3d_present(&black, 1, 1, NULL, 0, 0);
         }
         return;
     }
@@ -489,17 +607,34 @@ void video_present(int force)
         static u32 last_hash;
         static u64 t0;
         if (on < 0) on = getenv("AO_FPS") != NULL;
-        if (on) {
+        if (on || opt_showfps) {
             u32 hh = 2166136261u;
             const u32 *p = (const u32 *)src;
             for (int i = 0; i < video_w * video_h / 4; i += 7) hh = (hh ^ p[i]) * 16777619u;
             if (hh != last_hash) { frames++; last_hash = hh; }
-            if (now - t0 >= 5000) { if (t0) rt_log("fps: %.1f\n", frames * 1000.0 / (now - t0)); t0 = now; frames = 0; }
+            if (now - t0 >= (opt_showfps ? 1000u : 5000u)) {
+                if (t0 && on) rt_log("fps: %.1f\n", frames * 1000.0 / (now - t0));
+                if (t0 && opt_showfps) {
+                    char t[96];
+                    snprintf(t, sizeof t, "Alien Odyssey  -  %.0f fps", frames * 1000.0 / (now - t0));
+                    SDL_SetWindowTitle(win, t);
+                }
+                t0 = now; frames = 0;
+            }
         }
     }
     int n = video_w * video_h;
     for (int i = 0; i < n; i++) rgb[i] = pal32[src[i]];
-    if (d3d_ok) d3d_present(rgb, video_w, video_h);
+    {
+        const u8 *hp;
+        int hw, hh;
+        const u8 *hm;
+        if (d3d_ok && video_w == 320 && hires3d_frame(&hp, &hm, &hw, &hh)) {
+            if (rgb_hi_n < hw * hh) { free(rgb_hi); rgb_hi = malloc((size_t)hw * hh * 4); rgb_hi_n = hw * hh; }
+            for (int i = 0; i < hw * hh; i++) rgb_hi[i] = hm[i] ? pal32[hp[i]] : (pal32[hp[i]] & 0x00ffffffu);
+            d3d_present(rgb, video_w, video_h, rgb_hi, hw, hh);
+        } else if (d3d_ok) d3d_present(rgb, video_w, video_h, NULL, 0, 0);
+    }
     {   /* AO_SHOT=<ms>: save the game's screen to shots/ every <ms> (testing);
            AO_SHOTOUT=1 saves the final upscaled picture instead */
         static int shot_ms = -1;
