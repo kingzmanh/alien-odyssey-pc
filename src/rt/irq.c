@@ -211,6 +211,11 @@ void irq_poll(void)
         else call_handler(h);
     }
     if ((s64)(now - next_tick) > (s64)tick_period * 8) next_tick = now + tick_period;
+    {   /* AO_WATCH_AT=<ms>: arm the AO_WATCH write watch at that time */
+        static int armed;
+        const char *e = getenv("AO_WATCH_AT");
+        if (!armed && e && SDL_GetTicks64() >= (u64)atoi(e)) { extern void rt_watch_arm(void); armed = 1; rt_watch_arm(); }
+    }
     {   /* AO_DUMP=<ms>: log where the game is, every <ms> */
         static u64 next_dump;
         static int dump_ms = -1;

@@ -117,6 +117,10 @@ void video_present(int force)
         if (shot_ms > 0 && now >= next_shot) {
             next_shot = now + shot_ms;
             SDL_Surface *sf = SDL_CreateRGBSurfaceWithFormat(0, video_w, video_h, 32, SDL_PIXELFORMAT_ARGB8888);
+            {   /* AO_SHOTMEM=<hex addr>: shoot that guest buffer instead (debugging) */
+                const char *e = getenv("AO_SHOTMEM");
+                if (e) src = MEM + (u32)strtoul(e, NULL, 16);
+            }
             if (sf) {
                 for (int y = 0; y < video_h; y++) {
                     u32 *d = (u32 *)((u8 *)sf->pixels + y * sf->pitch);

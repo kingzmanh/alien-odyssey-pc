@@ -1,0 +1,3 @@
+# VILLAGE2.EXE
+427c6f N_brp_delta2x   # BRP delta frame, double size (self-modifying)
+427cfd N_brp_key2x     # BRP key frame, double size (self-modifying)

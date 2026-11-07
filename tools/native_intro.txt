@@ -1,0 +1,3 @@
+# INTRO.EXE
+431ea7 N_brp_delta2x   # BRP delta frame, double size (self-modifying)
+431f35 N_brp_key2x     # BRP key frame, double size (self-modifying)

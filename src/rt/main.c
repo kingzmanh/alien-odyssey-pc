@@ -171,12 +171,37 @@ void rt_fpu_restore(u32 a)
 }
 
 /* ---- guest memory ---- */
+static u32 watch_page;
+void rt_backtrace(const char *tag);
+
+/* AO_WATCH=<hex addr>[@ms]: one-shot write watch on that guest page (debugging) */
+void rt_watch_arm(void)
+{
+    const char *e = getenv("AO_WATCH");
+    if (!e) return;
+    u32 a = (u32)strtoul(e, NULL, 16);
+    watch_page = a & ~0xfffu;
+    DWORD old;
+    VirtualProtect(MEM + watch_page, 0x1000, PAGE_READONLY, &old);
+    rt_log("watch: armed on page %08x\n", watch_page);
+}
+
 static LONG WINAPI guest_fault(EXCEPTION_POINTERS *ep)
 {
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         ULONG_PTR addr = ep->ExceptionRecord->ExceptionInformation[1];
         if (addr >= (ULONG_PTR)MEM && addr < (ULONG_PTR)MEM + GUEST_RESERVE) {
             u32 ga = (u32)(addr - (ULONG_PTR)MEM);
+            if (watch_page && (ga & ~0xfffu) == watch_page) {
+                /* AO_WATCH hit: log the writer (host code address -> nm odyssey.exe) */
+                DWORD old;
+                VirtualProtect(MEM + watch_page, 0x1000, PAGE_READWRITE, &old);
+                rt_log("watch: write to %08x from host %p (exe base %p), guest esp %08x\n", ga,
+                       (void *)ep->ContextRecord->Rip, (void *)GetModuleHandleA(NULL), cpu.r[R_ESP]);
+                rt_backtrace("watch");
+                watch_page = 0;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
             /* commit on demand: guest code may touch memory it never asked for */
             if (VirtualAlloc((void *)(addr & ~(ULONG_PTR)0xffff), 0x10000, MEM_COMMIT, PAGE_READWRITE)) {
                 static int warned;

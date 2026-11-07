@@ -1,0 +1,3 @@
+# FOREST.EXE
+42f7ff N_brp_delta2x   # BRP delta frame, double size (self-modifying)
+42f88d N_brp_key2x     # BRP key frame, double size (self-modifying)

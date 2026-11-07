@@ -1,0 +1,3 @@
+# MINE.EXE
+4449e7 N_brp_delta2x   # BRP delta frame, double size (self-modifying)
+444a75 N_brp_key2x     # BRP key frame, double size (self-modifying)

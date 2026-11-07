@@ -226,6 +226,20 @@ void rt_int2f(void)
     case 0x150b: SETAX(CX == 3 ? 0x5ad8 : 0); SETBX(0xadad); break;
     case 0x150c: SETBX(0x0215); break;
     case 0x150d: WR8(ptr_es(cpu.r[R_EBX]), 3); break;
+    case 0x150f: {   /* get directory entry: ES:BX path, SI:DI buffer */
+        extern int mscdex_dir_entry(u32 path, u32 buf);
+        extern int rm_active;
+        u32 buf = rm_active ? (cpu.r[R_ESI] & 0xffff) * 16 + (cpu.r[R_EDI] & 0xffff) : cpu.r[R_EDI];
+        if (mscdex_dir_entry(ptr_es(cpu.r[R_EBX]), buf)) { SETAX(1); cpu.cf = 0; }
+        else { SETAX(2); cpu.cf = 1; }
+        break;
+    }
+    case 0x1510: {   /* send device driver request: ES:BX */
+        extern void mscdex_request(u32 rq);
+        mscdex_request(ptr_es(cpu.r[R_EBX]));
+        cpu.cf = 0;
+        break;
+    }
     case 0x1600: SETAL(0); break;                       /* no Windows */
     case 0x1686: SETAX(0); break;
     case 0x4300: SETAL(0); break;
