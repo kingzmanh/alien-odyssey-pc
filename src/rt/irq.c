@@ -180,6 +180,25 @@ static void call_handler(u32 h)
 
 void irq_call_handler(u32 h) { call_handler(h); }
 
+/* call a cdecl guest callback fn(arg0, arg1) from the runtime (sound
+   callbacks); the interrupted program's registers are kept */
+void rt_guest_callback(u32 fn, u32 arg0, u32 arg1)
+{
+    void (*f)(void) = rt_lookup(fn);
+    if (!f) { rt_log("callback to unknown code %08x\n", fn); return; }
+    CPU save = cpu;
+    cpu.r[R_ESP] -= 16;
+    cpu.r[R_ESP] &= ~3u;
+    WR32(cpu.r[R_ESP] + 8, arg1);
+    WR32(cpu.r[R_ESP] + 4, arg0);
+    WR32(cpu.r[R_ESP], MAGIC_IRET + 0xfc);
+    f();
+    memcpy(cpu.r, save.r, sizeof save.r);
+    cpu.cf = save.cf; cpu.zf = save.zf; cpu.sf = save.sf; cpu.of = save.of; cpu.pf = save.pf; cpu.af = save.af;
+    cpu.df = save.df;
+    for (int i = 0; i < 6; i++) { cpu.sreg[i] = save.sreg[i]; cpu.sbase[i] = save.sbase[i]; }
+}
+
 /* what the original BIOS handlers did, for vectors the game chains to */
 void irq_magic(u32 n)
 {
@@ -248,6 +267,7 @@ void irq_poll(void)
             }
         }
     }
+    { extern void sound_poll(void); sound_poll(); }
     input_pump();
     while (kbd_r != kbd_w) {
         kbd_cur = kbd_q[kbd_r];
