@@ -80,10 +80,11 @@ void irq_poll(void);
     zf = (_v >> 6) & 1; sf = (_v >> 7) & 1; cpu.df = (_v >> 10) & 1; of = (_v >> 11) & 1; } while (0)
 
 /* rep string ops: forward, flat fast paths */
-#define REP_MOVSB() do { if (!cpu.df) { memmove(MEM + edi + cpu.sbase[0], MEM + esi, ecx); esi += ecx; edi += ecx; ecx = 0; } \
-    else while (ecx) { WR8(edi + cpu.sbase[0], RD8(esi)); esi--; edi--; ecx--; } } while (0)
-#define REP_MOVSD(b) do { if (!cpu.df) { memmove(MEM + edi + cpu.sbase[0], MEM + esi, (size_t)ecx * 4); esi += ecx * 4; edi += ecx * 4; ecx = 0; } \
-    else while (ecx) { WR32(edi + cpu.sbase[0], RD32(esi)); esi -= 4; edi -= 4; ecx--; } } while (0)
+/* forward rep movs is a memcpy unless the destination starts inside the
+   source run: then x86 copies element by element and repeats the pattern
+   (LZ decompressors rely on that) */
+#define REP_MOVSB() do { u32 _d = edi + cpu.sbase[0];     if (!cpu.df && (u32)(_d - esi) >= ecx) { memmove(MEM + _d, MEM + esi, ecx); esi += ecx; edi += ecx; ecx = 0; }     else while (ecx) { WR8(edi + cpu.sbase[0], RD8(esi)); esi += DSTEP(1); edi += DSTEP(1); ecx--; } } while (0)
+#define REP_MOVSD(b) do { u32 _d = edi + cpu.sbase[0];     if (!cpu.df && (u32)(_d - esi) >= ecx * 4u) { memmove(MEM + _d, MEM + esi, (size_t)ecx * 4); esi += ecx * 4; edi += ecx * 4; ecx = 0; }     else while (ecx) { WR32(edi + cpu.sbase[0], RD32(esi)); esi += DSTEP(4); edi += DSTEP(4); ecx--; } } while (0)
 #define REP_STOSB() do { if (!cpu.df) { memset(MEM + edi + cpu.sbase[0], (u8)eax, ecx); edi += ecx; ecx = 0; } \
     else while (ecx) { WR8(edi + cpu.sbase[0], eax); edi--; ecx--; } } while (0)
 #define REP_STOSD() do { while (ecx) { WR32(edi + cpu.sbase[0], eax); edi += DSTEP(4); ecx--; } } while (0)

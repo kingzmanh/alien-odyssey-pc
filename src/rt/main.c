@@ -171,35 +171,51 @@ void rt_fpu_restore(u32 a)
 }
 
 /* ---- guest memory ---- */
-static u32 watch_page;
+static u32 watch_page, watch_lo, watch_hi, watch_left;
+static int watch_rearm;
 void rt_backtrace(const char *tag);
 
-/* AO_WATCH=<hex addr>[@ms]: one-shot write watch on that guest page (debugging) */
+/* AO_WATCH=<hex addr>[,<hex len>[,<max hits>]]: log every write into that
+   guest range: the page is made read-only, a write faults, is logged
+   (host code address -> tools/hostsym.py), single-stepped, and the page is
+   protected again (debugging) */
 void rt_watch_arm(void)
 {
     const char *e = getenv("AO_WATCH");
     if (!e) return;
-    u32 a = (u32)strtoul(e, NULL, 16);
-    watch_page = a & ~0xfffu;
+    char *end;
+    watch_lo = (u32)strtoul(e, &end, 16);
+    u32 len = *end == ',' ? (u32)strtoul(end + 1, &end, 16) : 4;
+    watch_left = *end == ',' ? (u32)strtoul(end + 1, NULL, 10) : 200;
+    watch_hi = watch_lo + len;
+    watch_page = watch_lo & ~0xfffu;
     DWORD old;
     VirtualProtect(MEM + watch_page, 0x1000, PAGE_READONLY, &old);
-    rt_log("watch: armed on page %08x\n", watch_page);
+    rt_log("watch: armed on %08x-%08x\n", watch_lo, watch_hi);
 }
 
 static LONG WINAPI guest_fault(EXCEPTION_POINTERS *ep)
 {
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP && watch_rearm) {
+        DWORD old;
+        watch_rearm = 0;
+        if (watch_left) VirtualProtect(MEM + watch_page, 0x1000, PAGE_READONLY, &old);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         ULONG_PTR addr = ep->ExceptionRecord->ExceptionInformation[1];
         if (addr >= (ULONG_PTR)MEM && addr < (ULONG_PTR)MEM + GUEST_RESERVE) {
             u32 ga = (u32)(addr - (ULONG_PTR)MEM);
             if (watch_page && (ga & ~0xfffu) == watch_page) {
-                /* AO_WATCH hit: log the writer (host code address -> nm odyssey.exe) */
                 DWORD old;
                 VirtualProtect(MEM + watch_page, 0x1000, PAGE_READWRITE, &old);
-                rt_log("watch: write to %08x from host %p (exe base %p), guest esp %08x\n", ga,
-                       (void *)ep->ContextRecord->Rip, (void *)GetModuleHandleA(NULL), cpu.r[R_ESP]);
-                rt_backtrace("watch");
-                watch_page = 0;
+                if (ga >= watch_lo && ga < watch_hi && watch_left) {
+                    watch_left--;
+                    rt_log("watch: write to %08x (now %08x) host %p base %p esp %08x\n", ga, RD32(ga & ~3u),
+                           (void *)ep->ContextRecord->Rip, (void *)GetModuleHandleA(NULL), cpu.r[R_ESP]);
+                }
+                watch_rearm = 1;
+                ep->ContextRecord->EFlags |= 0x100;   /* single-step the write, then protect again */
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
             /* commit on demand: guest code may touch memory it never asked for */

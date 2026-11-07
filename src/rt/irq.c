@@ -223,9 +223,19 @@ void irq_poll(void)
         if (dump_ms > 0 && SDL_GetTicks64() >= next_dump) {
             extern void rt_backtrace(const char *);
             next_dump = SDL_GetTicks64() + dump_ms;
-            rt_log("dump: eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x esp=%08x\n",
-                   cpu.r[0], cpu.r[3], cpu.r[1], cpu.r[2], cpu.r[6], cpu.r[7], cpu.r[5], cpu.r[4]);
+            rt_log("dump: eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x esp=%08x host %p base %p\n",
+                   cpu.r[0], cpu.r[3], cpu.r[1], cpu.r[2], cpu.r[6], cpu.r[7], cpu.r[5], cpu.r[4],
+                   __builtin_return_address(0), (void *)GetModuleHandleA(NULL));
             rt_backtrace("dump");
+            {   /* AO_DUMPMEM=addr,len: write that guest range to build/mem.bin */
+                const char *dm = getenv("AO_DUMPMEM");
+                if (dm) {
+                    char *end;
+                    u32 a = (u32)strtoul(dm, &end, 16), n = *end ? (u32)strtoul(end + 1, NULL, 16) : 0x10000;
+                    FILE *f = fopen("build/mem.bin", "wb");
+                    if (f) { fwrite(MEM + a, 1, n, f); fclose(f); }
+                }
+            }
             {   /* AO_PEEK=addr,addr,...: guest dwords to show with each dump */
                 const char *pk = getenv("AO_PEEK");
                 while (pk && *pk) {
@@ -303,7 +313,7 @@ static void port_note(u32 port, u32 at, int out)
 
 u32 rt_in8(u32 port, u32 at)
 {
-    rt_poll();
+    /* no interrupt polling here: the caller's registers are not synced (backward branches poll) */
     port &= 0xffff;
     switch (port) {
     case 0x60: return kbd_cur;
