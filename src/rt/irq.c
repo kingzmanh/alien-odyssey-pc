@@ -107,6 +107,19 @@ void input_pump(void)
             else if ((idx & 1) && now >= (u64)cms + 300) { mouse_buttons &= ~1; idx++; }
         }
     }
+    {   /* AO_KEYS=ms:sc:hold[;ms:sc:hold...]: scripted key presses (hex set-1
+           scancode, hold time in ms) for test runs */
+        static char script[512];
+        static int init, idx, down;
+        if (!init) { const char *e = getenv("AO_KEYS"); if (e) snprintf(script, sizeof script, "%s", e); init = 1; }
+        const char *p = script;
+        for (int k = 0; k < idx && p; k++) { p = strchr(p, ';'); if (p) p++; }
+        int ms, sc, hold;
+        if (p && *p && sscanf(p, "%d:%x:%d", &ms, &sc, &hold) == 3) {
+            if (!down && now >= (u64)ms) { kbd_push_scancode((u8)sc); bios_key_put((u16)(sc << 8)); rt_irq_pending = 1; down = 1; rt_log("test: key %02x\n", sc); }
+            else if (down && now >= (u64)(ms + hold)) { kbd_push_scancode((u8)(sc | 0x80)); rt_irq_pending = 1; down = 0; idx++; }
+        }
+    }
     while (SDL_PollEvent(&ev)) {
         switch (ev.type) {
         case SDL_QUIT:
